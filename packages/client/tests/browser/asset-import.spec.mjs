@@ -1,11 +1,20 @@
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   applyWorkbenchCommand,
   previewResourcePackage,
   parseWorkflowTemplate,
 } from '@zhuma/agent-core';
-import { packageFixture, packageZip } from '../../../../tests/fixtures/asset-package.mjs';
+import {
+  packageFixture,
+  packageZip,
+  privateCredentialFiles,
+} from '../../../../tests/fixtures/asset-package.mjs';
+import {
+  expertStarterRoot,
+  expertStarterFiles,
+} from '../../../../tests/fixtures/expert-starters.mjs';
 import { test, expect, failure } from './replay.mjs';
 
 const button = (scope, name) => scope.getByRole('button', { name, exact: true });
@@ -75,6 +84,32 @@ async function zip(page, files = packageFixture()) {
   await expect(page.getByRole('button', { name: /^Order analyst/ })).toBeVisible();
 }
 
+test('研发专家起步包可在普通目录入口预览并保存全部定义，不启动规划', async ({ page, replay }) => {
+  const files = await expertStarterFiles();
+  imports(replay, files);
+  await assets(page);
+  await button(page, '导入定义').click();
+  await page
+    .getByLabel('选择资产文件夹', { exact: true })
+    .setInputFiles(fileURLToPath(expertStarterRoot));
+  const modal = page.getByRole('dialog', { name: '导入资产', exact: true });
+  await expect(button(modal, '导入 8 项')).toBeEnabled();
+  await button(modal, '导入 8 项').click();
+  await expect(modal).toHaveCount(0);
+  const experts = replay.state.participants.filter((p) => p.origin?.sourceId?.startsWith('zhuma-'));
+  expect(experts).toHaveLength(4);
+  for (const expert of experts) {
+    expect(expert.available).toBe(true);
+    expect(expert.origin.sourceVersion).toBe('1.0.0');
+    expect(expert.resourceBindings.skillIds).toHaveLength(1);
+    expect(
+      replay.state.assets.find((a) => a.id === expert.resourceBindings.skillIds[0])?.available,
+    ).toBe(true);
+  }
+  expect(commands(replay)).toHaveLength(1);
+  expect(plans(replay)).toHaveLength(0);
+});
+
 test('资产目录含专家但复用同一身份，分类计数与编辑互通', async ({ page, replay }, testInfo) => {
   await assets(page);
   await expect(page.getByRole('article')).toHaveCount(14);
@@ -101,15 +136,30 @@ test('目录预览不读取私人文件；可切换定义/文件并取消，零�
 }, testInfo) => {
   imports(replay);
   const root = testInfo.outputPath('selected');
-  for (const file of packageFixture().filter((f) => f.path.startsWith('analyst/'))) {
+  const selectedFiles = [...packageFixture(), ...privateCredentialFiles()].filter((f) =>
+    f.path.startsWith('analyst/'),
+  );
+  for (const file of selectedFiles) {
     const path = resolve(root, file.path);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, Buffer.from(file.data, 'base64'));
   }
   await page.addInitScript(() => {
     const original = File.prototype.arrayBuffer;
+    const excluded = new Set([
+      'user.md',
+      '.env',
+      '.npmrc',
+      '.netrc',
+      '.git-credentials',
+      '.pypirc',
+    ]);
+    window.__assetPrivateReads = [];
     File.prototype.arrayBuffer = function () {
-      if (['USER.md', '.env'].includes(this.name)) throw Error('Private file must not be read');
+      if (excluded.has(this.name.toLowerCase())) {
+        window.__assetPrivateReads.push(this.webkitRelativePath || this.name);
+        throw Error('Private file must not be read');
+      }
       return original.call(this);
     };
   });
@@ -134,6 +184,9 @@ test('目录预览不读取私人文件；可切换定义/文件并取消，零�
   const source = replay.requests.find((r) => r.endpoint === 'preview-import');
   expect(source.files.find((f) => f.path.endsWith('USER.md')).data).toBe('');
   expect(source.files.find((f) => f.path.endsWith('.env')).data).toBe('');
+  for (const file of privateCredentialFiles().filter((f) => f.path.startsWith('analyst/')))
+    expect(source.files.find((f) => f.path === file.path).data).toBe('');
+  expect(await page.evaluate(() => window.__assetPrivateReads)).toEqual([]);
   expect(replay.state.assets).toHaveLength(12);
 });
 
