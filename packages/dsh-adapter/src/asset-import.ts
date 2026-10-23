@@ -119,12 +119,18 @@ export async function readImportArchive(data: string, signal: AbortSignal): Prom
     );
   });
 }
+/** ZIP reads go through this object so a caller can see whether bytes were opened. */
+export const importArchiveReader = {
+  read: readImportArchive,
+};
+
 export async function previewAssetImport(
   raw: unknown,
   signal: AbortSignal,
 ): Promise<ImportPackagePreview> {
   const source = PackageUploadSchema.parse(raw);
-  const files = source.kind === 'zip' ? await readImportArchive(source.data, signal) : source.files;
+  const files =
+    source.kind === 'zip' ? await importArchiveReader.read(source.data, signal) : source.files;
   signal.throwIfAborted();
   return previewResourcePackage(files, parseWorkflowTemplate);
 }

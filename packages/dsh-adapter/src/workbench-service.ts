@@ -6,13 +6,13 @@ import {
   WorkbenchError,
   planningPrompt,
   parsePlanningResult,
-  previewResourcePackage,
   parseWorkflowTemplate,
   StoredAssetPackageSchema,
   type StoredAssetPackage,
   type Workbench,
   type PlanProposal,
 } from '@zhuma/agent-core';
+import { legacyRouteEffects } from './legacy-route-effects.js';
 
 export interface WorkbenchStorage {
   read(): Workbench;
@@ -80,10 +80,9 @@ export class WorkbenchService {
       const next = applyWorkbenchCommand(state, request.command);
       if (request.command.type === 'import-package') {
         if (!this.packages) throw new WorkbenchError('asset-storage', '资产包存储尚未接入。');
-        const files = previewResourcePackage(
-          request.command.input.files,
-          parseWorkflowTemplate,
-        ).files.sort((a, b) => a.path.localeCompare(b.path, 'en'));
+        const files = legacyRouteEffects
+          .previewResourcePackage(request.command.input.files, parseWorkflowTemplate)
+          .files.sort((a, b) => a.path.localeCompare(b.path, 'en'));
         const record = StoredAssetPackageSchema.parse({
           versionId: request.command.input.versionId,
           files,

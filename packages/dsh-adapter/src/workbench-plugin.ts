@@ -12,8 +12,9 @@ import {
   StoredAssetPackageSchema,
   AssetImportError,
 } from '@zhuma/agent-core';
+import { authorizeLegacyOwnerRoutes, LEGACY_OWNER_ROUTES } from './member-session.js';
 import { WorkbenchService, type PlanningModel } from './workbench-service.js';
-import { previewAssetImport } from './asset-import.js';
+import { legacyRouteEffects } from './legacy-route-effects.js';
 
 const AuditSchema = z.object({
   id: z.string(),
@@ -72,7 +73,10 @@ export async function apply(ctx: Context): Promise<void> {
       signal.throwIfAborted();
       switch (endpoint) {
         case 'preview-import':
-          return { ok: true, value: await previewAssetImport(payload, signal) };
+          return {
+            ok: true,
+            value: await legacyRouteEffects.previewAssetImport(payload, signal),
+          };
         case 'resource-files': {
           const input = z
             .strictObject({
@@ -157,12 +161,23 @@ export async function apply(ctx: Context): Promise<void> {
   }
   // Connection exact routes retain its Host/Origin and owner-only authentication.
   // /api's single RPC interceptor belongs to the official Typert gateway.
-  for (const endpoint of ['snapshot', 'command', 'plan', 'preview-import', 'resource-files']) {
+  // Close these routes before the body is read. JSON, ZIP parsing, file bytes,
+  // and zhuma_asset_packages writes run only after the gate allows the request.
+  // The package domain stores immutable bytes and does not authorize them.
+  // import-package is a command on `command`, so it closes with that route.
+  for (const endpoint of LEGACY_OWNER_ROUTES) {
     ctx.connection.fetch.register({
       path: `/api/zhuma/${endpoint}`,
       methods: ['POST'],
       requestBody: 'buffered',
       fetch: async (request) => {
+        const gate = authorizeLegacyOwnerRoutes(ctx);
+        if (!gate.ok) {
+          return Response.json(
+            { ok: false, error: { code: gate.code } },
+            { status: gate.status, headers: { 'cache-control': 'no-store' } },
+          );
+        }
         if (request.headers.get('content-type')?.split(';')[0] !== 'application/json')
           return new Response(null, { status: 415 });
         let body: unknown;
