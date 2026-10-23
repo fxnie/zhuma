@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { parseWorkflowTemplate, previewResourcePackage } from '@zhuma/agent-core';
 import { importArchiveReader } from '../dist/asset-import.js';
 import { legacyRouteEffects } from '../dist/legacy-route-effects.js';
+import { applyIdentity } from '../dist/identity-session.js';
 import {
   configureDeploymentMode,
-  installMemberResolver,
+  deploymentMode,
   LEGACY_OWNER_ROUTES,
   memberCredential,
-  uninstallMemberResolver,
 } from '../dist/member-session.js';
 import { apply } from '../dist/workbench-plugin.js';
 import {
@@ -55,6 +55,9 @@ async function mount(mode = 'legacy-single-user') {
   const opened = [];
   const packages = new Map();
   const touches = { read: 0, write: 0 };
+  const grants = new Map();
+  const pause = { open: null, close: null };
+  let identityDomain;
   let state = fixture().state;
   packages.set(SECRET_VERSION, {
     versionId: SECRET_VERSION,
@@ -66,16 +69,60 @@ async function mount(mode = 'legacy-single-user') {
       const dispose = callback();
       effects.push(dispose);
     },
+    credentials: {
+      async modifyRecord(key, mutate) {
+        const next = await mutate(grants.get(key));
+        if (next !== undefined) grants.set(key, next);
+        return grants.get(key);
+      },
+    },
+    webServer: {
+      register() {
+        return () => {};
+      },
+    },
+    remoteAccess: {
+      registerPolicy() {
+        return () => {};
+      },
+    },
     connection: {
       fetch: {
         register(route) {
           routes.set(route.path, route);
         },
       },
+      requestRejection() {
+        return undefined;
+      },
+      admit() {
+        return { peer: { principal: { kind: 'owner' } } };
+      },
     },
     storageDomain: {
       async open(spec) {
         opened.push(spec.name);
+        if (spec.name === 'zhuma_identity') {
+          const domain = memoryDomain(structuredClone(spec.global.initial));
+          identityDomain = domain;
+          const holdOpen = pause.open;
+          pause.open = null;
+          if (holdOpen) {
+            holdOpen.started();
+            await holdOpen.gate;
+          }
+          const finish = domain.close;
+          domain.close = async () => {
+            const holdClose = pause.close;
+            pause.close = null;
+            if (holdClose) {
+              holdClose.started();
+              await holdClose.gate;
+            }
+            await finish();
+          };
+          return domain;
+        }
         if (spec.name === 'zhuma_asset_packages') {
           assert.equal(spec.layout, 'per-record');
           assert.equal(spec.version, 1);
@@ -146,25 +193,85 @@ async function mount(mode = 'legacy-single-user') {
     opened,
     packages,
     touches,
+    pause,
+    grants,
+    identityDomain: () => identityDomain,
     revision: () => state.revision,
   };
 }
 
-function ownerMappingResolver() {
-  const secret = randomBytes(32);
-  const sessionId = randomUUID();
-  const expiresAt = Date.now() + 60_000;
+function memoryDomain(initial) {
+  const tables = new Map();
+  let global = initial;
   return {
-    cookie: `zhuma-member=${memberCredential(secret, sessionId, expiresAt)}`,
-    source: {
-      secret,
-      requestRejection: () => undefined,
-      findSession: (id) => (id === sessionId ? { accountId: 'lin', expiresAt } : undefined),
-      spaceIdsFor: () => ['solo-space'],
-      singleUserAccountId: () => 'lin',
-      admitOwner: () => true,
+    async close() {},
+    global: {
+      get: () => global,
+      set: async (value) => {
+        global = value;
+      },
+    },
+    table(name) {
+      let rows = tables.get(name);
+      if (rows === undefined) {
+        rows = new Map();
+        tables.set(name, rows);
+      }
+      return {
+        get: (id) => rows.get(id),
+        put: async (id, value) => {
+          rows.set(id, value);
+        },
+        delete: async (id) => {
+          rows.delete(id);
+        },
+        keys: () => rows.keys(),
+        entries: () => rows.entries(),
+        get size() {
+          return rows.size;
+        },
+      };
     },
   };
+}
+
+function createHold() {
+  let release;
+  let started;
+  const ready = new Promise((resolve) => {
+    started = resolve;
+  });
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  return { ready, gate, started, release: () => release() };
+}
+
+const VERIFIER = `scrypt$16384$8$1$${'ab'.repeat(16)}$${'cd'.repeat(32)}`;
+
+function memberImport() {
+  return { accounts: [{ id: 'lin', passwordHash: VERIFIER }] };
+}
+
+async function startIdentity(mounted, imported = memberImport()) {
+  const before = mounted.effects.length;
+  await applyIdentity(mounted.ctx, imported);
+  return async () => {
+    for (const dispose of mounted.effects.slice(before)) await dispose();
+  };
+}
+
+async function memberCookie(mounted) {
+  const record = mounted.grants.get('zhuma-identity/member-session');
+  const secret = Buffer.from(record.payload.secret, 'base64url');
+  const sessionId = randomUUID();
+  const expiresAt = Date.now() + 60_000;
+  await mounted.identityDomain().table('sessions').put(sessionId, {
+    id: sessionId,
+    accountId: 'lin',
+    expiresAt,
+  });
+  return `zhuma-member=${memberCredential(secret, sessionId, expiresAt)}`;
 }
 
 function importPayload() {
@@ -183,9 +290,11 @@ function assertUntouched(touches, revision) {
 
 async function assertDenied(mounted, status, code, cookie) {
   const zip = packageZip(packageFixture().slice(0, 2));
+  const command = importPayload();
+  assert.equal(command.type, 'import-package');
   const payloads = {
     snapshot: {},
-    command: importPayload(),
+    command,
     plan: { requestId: randomUUID(), expectedRevision: 0, taskId: 'task', instruction: '' },
     'preview-import': { kind: 'zip', data: zip },
     'resource-files': { kind: 'expert', id: 'imported-1', versionId: SECRET_VERSION },
@@ -197,12 +306,19 @@ async function assertDenied(mounted, status, code, cookie) {
       `zhuma/${endpoint}`,
       cookie,
     );
-    assert.equal(refused.status, status);
-    assert.equal(refused.headers.get('cache-control'), 'no-store');
+    assert.equal(refused.status, status, endpoint);
+    assert.equal(refused.headers.get('cache-control'), 'no-store', endpoint);
     const body = await refused.json();
     assert.deepEqual(body, { ok: false, error: { code } });
-    assert.equal(JSON.stringify(body).includes('GLOBAL_DIRECTORY_BYTES'), false);
-    assert.equal(JSON.stringify(body).includes('tasks'), false);
+    assert.equal(Object.hasOwn(body, 'files'), false, endpoint);
+    assert.equal(JSON.stringify(body).includes(SECRET), false, endpoint);
+    assert.equal(JSON.stringify(body).includes('GLOBAL_DIRECTORY_BYTES'), false, endpoint);
+    assert.equal(JSON.stringify(body).includes('tasks'), false, endpoint);
+    assert.equal(seen.preview, 0, endpoint);
+    assert.equal(seen.read, 0, endpoint);
+    assert.equal(seen.parse, 0, endpoint);
+    assert.equal(mounted.touches.read, 0, endpoint);
+    assert.equal(mounted.touches.write, 0, endpoint);
   }
   const malformed = await mounted.routes.get('/api/zhuma/preview-import').fetch(
     new Request('http://localhost/api/zhuma/preview-import', {
@@ -310,35 +426,78 @@ test('legacy-single-user previews a zip without writing the package', async () =
 
 test('an unset deployment mode denies asset routes before parse, read, or persist', async () => {
   const mounted = await mount(null);
-  const resolver = ownerMappingResolver();
-  installMemberResolver(mounted.ctx, resolver.source);
-  try {
-    await assertDenied(mounted, 401, 'deployment-mode-unset');
-    await assertDenied(mounted, 401, 'deployment-mode-unset', 'dsh-browser=owner');
-    await assertDenied(mounted, 401, 'deployment-mode-unset', 'zhuma-member=not-a-cookie');
-    await assertDenied(mounted, 401, 'deployment-mode-unset', resolver.cookie);
-  } finally {
-    uninstallMemberResolver(mounted.ctx);
-  }
+  assert.equal(deploymentMode(mounted.ctx), undefined);
+  await assertDenied(mounted, 401, 'deployment-mode-unset');
+  await assertDenied(mounted, 401, 'deployment-mode-unset', 'dsh-browser=owner');
+  await assertDenied(mounted, 401, 'deployment-mode-unset', 'zhuma-member=not-a-cookie');
 });
 
-test('multi-member denies asset routes while identity is absent, failed, or remounted', async () => {
+test('multi-member denies every owner route when identity is not ready', async () => {
   const mounted = await mount('multi-member');
-  const resolver = ownerMappingResolver();
+  assert.equal(deploymentMode(mounted.ctx), 'multi-member');
+  assert.equal(mounted.identityDomain(), undefined);
+  await assertDenied(mounted, 404, 'not-found');
+  await assertDenied(mounted, 404, 'not-found', 'dsh-browser=owner');
+});
+
+test('multi-member denies every owner route when identity failed', async () => {
+  const mounted = await mount('multi-member');
+  await assert.rejects(
+    () => applyIdentity(mounted.ctx, { accounts: [] }),
+    /identity import was rejected: accounts is empty/,
+  );
+  assert.equal(deploymentMode(mounted.ctx), 'multi-member');
   await assertDenied(mounted, 404, 'not-found');
   await assertDenied(mounted, 404, 'not-found', 'zhuma-member=not-a-cookie');
-  installMemberResolver(mounted.ctx, resolver.source);
-  try {
-    await assertDenied(mounted, 404, 'not-found', 'dsh-browser=owner');
-    await assertDenied(mounted, 404, 'not-found', resolver.cookie);
-    uninstallMemberResolver(mounted.ctx);
-    await assertDenied(mounted, 404, 'not-found');
-    await assertDenied(mounted, 404, 'not-found', resolver.cookie);
-    installMemberResolver(mounted.ctx, resolver.source);
-    await assertDenied(mounted, 404, 'not-found', resolver.cookie);
-    for (const dispose of mounted.effects) await dispose();
-    await assertDenied(mounted, 404, 'not-found', 'dsh-browser=owner');
-  } finally {
-    uninstallMemberResolver(mounted.ctx);
-  }
+  await assertDenied(mounted, 404, 'not-found', 'dsh-browser=owner');
+});
+
+test('multi-member denies every owner route when the cookie is missing', async () => {
+  const mounted = await mount('multi-member');
+  await startIdentity(mounted);
+  await assertDenied(mounted, 404, 'not-found');
+});
+
+test('multi-member denies every owner route for an invalid cookie', async () => {
+  const mounted = await mount('multi-member');
+  await startIdentity(mounted);
+  const accepted = await memberCookie(mounted);
+  await assertDenied(mounted, 404, 'not-found', 'zhuma-member=not-a-cookie');
+  await assertDenied(mounted, 404, 'not-found', 'dsh-browser=owner');
+  await assertDenied(mounted, 404, 'not-found', accepted);
+});
+
+test('multi-member denies every owner route while identity unmounts', async () => {
+  const mounted = await mount('multi-member');
+  const stop = await startIdentity(mounted);
+  const hold = createHold();
+  mounted.pause.close = hold;
+  const stopping = stop();
+  await hold.ready;
+  await assertDenied(mounted, 404, 'not-found');
+  await assertDenied(mounted, 404, 'not-found', 'zhuma-member=not-a-cookie');
+  hold.release();
+  await stopping;
+  assert.equal(mounted.identityDomain().global.get().importComplete, true);
+  await assertDenied(mounted, 404, 'not-found');
+  await assertDenied(mounted, 404, 'not-found', 'dsh-browser=owner');
+});
+
+test('multi-member denies every owner route while identity remounts', async () => {
+  const mounted = await mount('multi-member');
+  const stop = await startIdentity(mounted);
+  await stop();
+  const hold = createHold();
+  mounted.pause.open = hold;
+  const remounting = startIdentity(mounted);
+  await hold.ready;
+  await assertDenied(mounted, 404, 'not-found');
+  await assertDenied(mounted, 404, 'not-found', 'zhuma-member=not-a-cookie');
+  hold.release();
+  const stopAgain = await remounting;
+  const accepted = await memberCookie(mounted);
+  await assertDenied(mounted, 404, 'not-found', accepted);
+  await assertDenied(mounted, 404, 'not-found');
+  await stopAgain();
+  await assertDenied(mounted, 404, 'not-found', 'dsh-browser=owner');
 });
