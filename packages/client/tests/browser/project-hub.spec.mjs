@@ -22,6 +22,10 @@ async function openProject(page) {
     .getByRole('button', { name: '订单门户', exact: true })
     .click();
 }
+async function openTaskAdvanced(page) {
+  const advanced = page.locator('.zm-create-advanced');
+  if ((await advanced.getAttribute('open')) === null) await advanced.locator('summary').click();
+}
 async function togglePerson(page, label, name, checked) {
   await button(page, `选择${label}`).click();
   const picker = page.getByRole('dialog', { name: `选择${label}`, exact: true });
@@ -124,6 +128,7 @@ test('项目内任务继承默认值，换项目保留人工选择，显式重�
   await openProject(page);
   await button(page, '＋ 创建任务').click();
   const dialog = page.getByRole('dialog', { name: '创建任务', exact: true });
+  await openTaskAdvanced(page);
   await expect(button(dialog, '选择参与者')).toContainText('陈宁、质量专家');
   await togglePerson(page, '参与者', '界面专家', true);
   await dialog.getByRole('combobox', { name: '所属项目', exact: true }).click();
@@ -154,6 +159,8 @@ test('项目内 AI 创建只用默认参与者，规划失败仍返回同一项�
   await openProject(page);
   await button(page, '＋ 创建任务').click();
   await page.getByLabel('任务目标', { exact: true }).fill('新增订单检索');
+  await openTaskAdvanced(page);
+  await page.getByRole('radio', { name: 'AI 规划', exact: true }).check();
   await button(page, '生成计划').click();
   await expect(page.getByRole('alert')).toContainText('规划服务暂不可用');
   expect(replay.state.tasks.at(-1).participantIds).toEqual(['chen', 'qa']);
@@ -164,8 +171,10 @@ test('项目内 AI 创建只用默认参与者，规划失败仍返回同一项�
   await button(page.getByRole('dialog', { name: '新建项目', exact: true }), '保存').click();
   await expect(page.getByRole('heading', { name: '供应商门户', exact: true })).toBeVisible();
   await button(page, '＋ 创建任务').click();
+  await openTaskAdvanced(page);
   await expect(button(page, '选择参与者')).toHaveText('选择参与者');
   await page.getByLabel('任务目标', { exact: true }).fill('确定门户入口');
+  await page.getByRole('radio', { name: 'AI 规划', exact: true }).check();
   await button(page, '生成计划').click();
   await expect(
     page.getByRole('dialog', { name: '创建任务', exact: true }).getByRole('alert'),

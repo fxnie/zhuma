@@ -55,6 +55,7 @@ type Dialog =
       value: WorkTask;
       participantIdsEdited: boolean;
       planning: 'ai' | 'manual' | 'template';
+      advancedOpen: boolean;
       template: {
         assetId: string;
         roles: TemplateBindingValues;
@@ -491,7 +492,8 @@ export function WorkbenchPage({
     openDialog({
       kind: 'task',
       participantIdsEdited: false,
-      planning: member && !capabilities?.planning ? 'manual' : 'ai',
+      planning: 'manual',
+      advancedOpen: false,
       template: null,
       value: {
         id: uid(),
@@ -1571,178 +1573,198 @@ export function WorkbenchPage({
                         placeholder="这次要完成什么？描述目标与预期结果…"
                       />
                     </Field>
-                    <div className="zm-creation-context">
-                      <div className="zm-task-project-choice">
-                        <div className="zm-creation-field-heading">
-                          <span>所属项目</span>
-                          {!!state.projects.length && (!member || capabilities?.createProject) && (
-                            <Button variant="quiet" onClick={() => createProjectForTask(dialog)}>
-                              新建项目
-                            </Button>
-                          )}
-                        </div>
-                        {state.projects.length ? (
-                          <SingleSelect
-                            label="所属项目"
-                            value={dialog.value.projectId}
-                            onValueChange={(projectId) =>
-                              setDialog({ ...dialog, value: { ...dialog.value, projectId } })
-                            }
-                            options={state.projects.map((p) => ({ value: p.id, label: p.name }))}
-                          />
-                        ) : (
-                          <span className="zm-project-needed">尚无项目</span>
+                    <div className="zm-task-project-choice">
+                      <div className="zm-creation-field-heading">
+                        <span>所属项目</span>
+                        {!!state.projects.length && (!member || capabilities?.createProject) && (
+                          <Button variant="quiet" onClick={() => createProjectForTask(dialog)}>
+                            新建项目
+                          </Button>
                         )}
                       </div>
-                      <div className="zm-creation-participants">
-                        <div className="zm-creation-field-heading">
-                          <span>参与者 · {dialog.value.participantIds.length} 位</span>
-                          {state.projects.find((p) => p.id === dialog.value.projectId)
-                            ?.defaultParticipantIds !== undefined && (
-                            <Button
-                              variant="quiet"
-                              aria-label="使用项目默认参与者"
-                              onClick={() =>
-                                changeTaskParticipants(
-                                  initialParticipants(
-                                    state.projects.find((p) => p.id === dialog.value.projectId),
-                                    state,
-                                  ),
-                                )
-                              }
-                            >
-                              使用项目默认
-                            </Button>
-                          )}
-                        </div>
-                        <ParticipantSelect
-                          label="参与者"
-                          multiple
-                          members={state.participants}
-                          selected={dialog.value.participantIds}
-                          change={changeTaskParticipants}
-                        />
-                      </div>
-                    </div>
-                    {member && <PlanningReadiness value={planningReadiness} />}
-                    <fieldset className="zm-create-modes">
-                      <legend>规划方式</legend>
-                      <label>
-                        <input
-                          type="radio"
-                          name="planning-mode"
-                          value="ai"
-                          disabled={
-                            !!member &&
-                            (!capabilities?.planning ||
-                              (dialog.value.ownerId !== null &&
-                                dialog.value.ownerId !== member.actorId))
+                      {state.projects.length ? (
+                        <SingleSelect
+                          label="所属项目"
+                          value={dialog.value.projectId}
+                          onValueChange={(projectId) =>
+                            setDialog({ ...dialog, value: { ...dialog.value, projectId } })
                           }
-                          checked={dialog.planning === 'ai'}
-                          onChange={() => setDialog({ ...dialog, planning: 'ai' })}
+                          options={state.projects.map((p) => ({ value: p.id, label: p.name }))}
                         />
-                        <span>
-                          <strong>AI 规划</strong>
-                        </span>
-                      </label>
-                      {(!member ||
-                        state.assets.some(
-                          (asset) => asset.kind === 'template' && asset.available,
-                        )) && (
-                        <label>
-                          <input
-                            type="radio"
-                            name="planning-mode"
-                            value="template"
-                            checked={dialog.planning === 'template'}
-                            onChange={() => {
-                              setDialog({ ...dialog, planning: 'template' });
-                              if (!dialog.template) setTemplateBrowserOpen(true);
-                            }}
-                          />
-                          <span>
-                            <strong>使用工作流</strong>
-                          </span>
-                        </label>
+                      ) : (
+                        <span className="zm-project-needed">尚无项目</span>
                       )}
-                      <label>
-                        <input
-                          type="radio"
-                          name="planning-mode"
-                          value="manual"
-                          checked={dialog.planning === 'manual'}
-                          onChange={() => setDialog({ ...dialog, planning: 'manual' })}
-                        />
-                        <span>
-                          <strong>从空白开始</strong>
-                        </span>
-                      </label>
-                    </fieldset>
-                    {dialog.planning === 'template' && (
-                      <section className="zm-template-creation">
-                        <div className="zm-template-chosen">
-                          <div>
-                            <strong>{selectedTemplate?.name ?? '选择可复用的工作流'}</strong>
-                            {selectedDefinition && (
-                              <small>
-                                {selectedDefinition.workflows.flatMap((w) => w.nodes).length} 个节点
-                                · {selectedDefinition.roles.length} 个角色
-                              </small>
+                    </div>
+                    <details className="zm-create-advanced" open={dialog.advancedOpen}>
+                      <summary
+                        onClick={(event) => {
+                          event.preventDefault();
+                          setDialog({ ...dialog, advancedOpen: !dialog.advancedOpen });
+                        }}
+                      >
+                        更多设置
+                        <small>
+                          {dialog.planning === 'ai'
+                            ? 'AI 规划'
+                            : dialog.planning === 'template'
+                              ? '使用工作流'
+                              : '从空白开始'}
+                        </small>
+                      </summary>
+                      <div className="zm-create-advanced-body">
+                        <div className="zm-creation-participants">
+                          <div className="zm-creation-field-heading">
+                            <span>参与者 · {dialog.value.participantIds.length} 位</span>
+                            {state.projects.find((p) => p.id === dialog.value.projectId)
+                              ?.defaultParticipantIds !== undefined && (
+                              <Button
+                                variant="quiet"
+                                aria-label="使用项目默认参与者"
+                                onClick={() =>
+                                  changeTaskParticipants(
+                                    initialParticipants(
+                                      state.projects.find((p) => p.id === dialog.value.projectId),
+                                      state,
+                                    ),
+                                  )
+                                }
+                              >
+                                使用项目默认
+                              </Button>
                             )}
                           </div>
-                          <Button onClick={() => setTemplateBrowserOpen(true)}>
-                            {dialog.template ? '更换' : '选择工作流'}
-                          </Button>
-                        </div>
-                        {dialog.template && selectedDefinition && (
-                          <TemplateBindings
-                            roles={selectedDefinition.roles}
-                            resources={selectedDefinition.resources}
-                            members={state.participants.filter((p) =>
-                              dialog.value.participantIds.includes(p.id),
-                            )}
-                            assets={state.assets}
-                            roleValues={dialog.template.roles}
-                            resourceValues={dialog.template.resources}
-                            changeRoles={(roles) =>
-                              setDialog({ ...dialog, template: { ...dialog.template!, roles } })
-                            }
-                            changeResources={(resources) =>
-                              setDialog({ ...dialog, template: { ...dialog.template!, resources } })
-                            }
+                          <ParticipantSelect
+                            label="参与者"
+                            multiple
+                            members={state.participants}
+                            selected={dialog.value.participantIds}
+                            change={changeTaskParticipants}
                           />
+                        </div>
+                        {member && <PlanningReadiness value={planningReadiness} />}
+                        <fieldset className="zm-create-modes">
+                          <legend>规划方式</legend>
+                          <label>
+                            <input
+                              type="radio"
+                              name="planning-mode"
+                              value="ai"
+                              disabled={
+                                !!member &&
+                                (!capabilities?.planning ||
+                                  (dialog.value.ownerId !== null &&
+                                    dialog.value.ownerId !== member.actorId))
+                              }
+                              checked={dialog.planning === 'ai'}
+                              onChange={() => setDialog({ ...dialog, planning: 'ai' })}
+                            />
+                            <span>
+                              <strong>AI 规划</strong>
+                            </span>
+                          </label>
+                          {(!member ||
+                            state.assets.some(
+                              (asset) => asset.kind === 'template' && asset.available,
+                            )) && (
+                            <label>
+                              <input
+                                type="radio"
+                                name="planning-mode"
+                                value="template"
+                                checked={dialog.planning === 'template'}
+                                onChange={() => {
+                                  setDialog({ ...dialog, planning: 'template' });
+                                  if (!dialog.template) setTemplateBrowserOpen(true);
+                                }}
+                              />
+                              <span>
+                                <strong>使用工作流</strong>
+                              </span>
+                            </label>
+                          )}
+                          <label>
+                            <input
+                              type="radio"
+                              name="planning-mode"
+                              value="manual"
+                              checked={dialog.planning === 'manual'}
+                              onChange={() => setDialog({ ...dialog, planning: 'manual' })}
+                            />
+                            <span>
+                              <strong>从空白开始</strong>
+                            </span>
+                          </label>
+                        </fieldset>
+                        {dialog.planning === 'template' && (
+                          <section className="zm-template-creation">
+                            <div className="zm-template-chosen">
+                              <div>
+                                <strong>{selectedTemplate?.name ?? '选择可复用的工作流'}</strong>
+                                {selectedDefinition && (
+                                  <small>
+                                    {selectedDefinition.workflows.flatMap((w) => w.nodes).length}{' '}
+                                    个节点 · {selectedDefinition.roles.length} 个角色
+                                  </small>
+                                )}
+                              </div>
+                              <Button onClick={() => setTemplateBrowserOpen(true)}>
+                                {dialog.template ? '更换' : '选择工作流'}
+                              </Button>
+                            </div>
+                            {dialog.template && selectedDefinition && (
+                              <TemplateBindings
+                                roles={selectedDefinition.roles}
+                                resources={selectedDefinition.resources}
+                                members={state.participants.filter((p) =>
+                                  dialog.value.participantIds.includes(p.id),
+                                )}
+                                assets={state.assets}
+                                roleValues={dialog.template.roles}
+                                resourceValues={dialog.template.resources}
+                                changeRoles={(roles) =>
+                                  setDialog({ ...dialog, template: { ...dialog.template!, roles } })
+                                }
+                                changeResources={(resources) =>
+                                  setDialog({
+                                    ...dialog,
+                                    template: { ...dialog.template!, resources },
+                                  })
+                                }
+                              />
+                            )}
+                          </section>
                         )}
-                      </section>
-                    )}
-                    <Field label="任务名称">
-                      <input
-                        maxLength={160}
-                        value={dialog.value.title}
-                        onChange={(e) =>
-                          setDialog({
-                            ...dialog,
-                            value: { ...dialog.value, title: e.target.value },
-                          })
-                        }
-                        placeholder="可选，留空时从目标生成"
-                      />
-                    </Field>
-                    <ParticipantSelect
-                      label="任务负责人"
-                      members={state.participants.filter(
-                        (p) => p.kind === 'human' && dialog.value.participantIds.includes(p.id),
-                      )}
-                      selected={dialog.value.ownerId ? [dialog.value.ownerId] : []}
-                      change={(ids) =>
-                        setDialog({
-                          ...dialog,
-                          planning:
-                            member && ids[0] !== member.actorId ? 'manual' : dialog.planning,
-                          value: { ...dialog.value, ownerId: ids[0] ?? null },
-                        })
-                      }
-                    />
-                    {!dialog.value.ownerId && <small>确认工作流前需指定负责人。</small>}
+                        <Field label="任务名称">
+                          <input
+                            maxLength={160}
+                            value={dialog.value.title}
+                            onChange={(e) =>
+                              setDialog({
+                                ...dialog,
+                                value: { ...dialog.value, title: e.target.value },
+                              })
+                            }
+                            placeholder="可选，留空时从目标生成"
+                          />
+                        </Field>
+                        <ParticipantSelect
+                          label="任务负责人"
+                          members={state.participants.filter(
+                            (p) => p.kind === 'human' && dialog.value.participantIds.includes(p.id),
+                          )}
+                          selected={dialog.value.ownerId ? [dialog.value.ownerId] : []}
+                          change={(ids) =>
+                            setDialog({
+                              ...dialog,
+                              planning:
+                                member && ids[0] !== member.actorId ? 'manual' : dialog.planning,
+                              value: { ...dialog.value, ownerId: ids[0] ?? null },
+                            })
+                          }
+                        />
+                        {!dialog.value.ownerId && <small>确认工作流前需指定负责人。</small>}
+                      </div>
+                    </details>
                   </>
                 )}
               </fieldset>

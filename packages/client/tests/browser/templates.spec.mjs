@@ -16,6 +16,10 @@ async function evidence(page, testInfo, name) {
   await mkdir(dir, { recursive: true });
   await page.screenshot({ path: resolve(dir, `${name}-${testInfo.project.name}.png`) });
 }
+async function openTaskAdvanced(page) {
+  const advanced = page.locator('.zm-create-advanced');
+  if ((await advanced.getAttribute('open')) === null) await advanced.locator('summary').click();
+}
 async function select(page, label, name) {
   await page.getByLabel(label, { exact: true }).click();
   await page.getByRole('option', { name, exact: true }).click();
@@ -105,6 +109,7 @@ test('预览真实并行与子工作流；完整映射后创建独立可编辑�
   await evidence(page, testInfo, 'task-entry');
   await button(page, '＋ 创建任务').click();
   await page.getByLabel('任务目标', { exact: true }).fill('为采购门户增加状态筛选');
+  await openTaskAdvanced(page);
   await page.getByRole('radio', { name: '使用工作流', exact: true }).check();
   const browser = page.getByRole('dialog', { name: '选择工作流', exact: true });
   await expect(browser.locator('.react-flow__node')).toHaveCount(3);
@@ -324,6 +329,7 @@ test('长目录与小窗保持预览和操作可达，嵌套选择取消保留�
   await page.goto('/');
   await button(page, '＋ 创建任务').click();
   await page.getByLabel('任务目标', { exact: true }).fill('保持这份任务目标');
+  await openTaskAdvanced(page);
   await page.getByRole('radio', { name: '使用工作流', exact: true }).check();
   const browser = page.getByRole('dialog', { name: '选择工作流', exact: true });
   await page.getByLabel('搜索工作流').fill('第 24 版');

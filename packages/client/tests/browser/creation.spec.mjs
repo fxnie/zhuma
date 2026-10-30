@@ -8,6 +8,14 @@ async function creation(page, goal, url = '/') {
   await button(page, '＋ 创建任务').click();
   await page.getByLabel('任务目标', { exact: true }).fill(goal);
 }
+async function openTaskAdvanced(page) {
+  const advanced = page.locator('.zm-create-advanced');
+  if ((await advanced.getAttribute('open')) === null) await advanced.locator('summary').click();
+}
+async function chooseAiPlanning(page) {
+  await openTaskAdvanced(page);
+  await page.getByRole('radio', { name: 'AI 规划', exact: true }).check();
+}
 
 test('从空项目创建任务：建项目前后保留目标和规划方式，取消可返回原草稿', async ({
   page,
@@ -25,6 +33,7 @@ test('从空项目创建任务：建项目前后保留目标和规划方式，�
   await creation(page, '整理首个项目的交付说明');
   await expect(page.getByRole('dialog', { name: '创建任务' })).toBeVisible();
   await expect(button(page, '先创建项目')).toBeVisible();
+  await openTaskAdvanced(page);
   await page.getByRole('radio', { name: '从空白开始' }).check();
   await button(page, '先创建项目').click();
   await expect(page.getByRole('dialog', { name: '新建项目' })).toContainText(
@@ -61,6 +70,7 @@ test('从空项目创建任务：建项目前后保留目标和规划方式，�
 test('人工清空参与者后新建项目，返回任务时仍为空', async ({ page, replay }) => {
   replay.state.projects[0].defaultParticipantIds = ['chen'];
   await creation(page, '人工核对首版交付');
+  await openTaskAdvanced(page);
   await button(page, '选择参与者').click();
   const taskPicker = page.getByRole('dialog', { name: '选择参与者', exact: true });
   await taskPicker
@@ -92,6 +102,7 @@ test('人工清空参与者后新建项目，返回任务时仍为空', async ({
 test('未编辑参与者时，新项目默认参与者进入原任务草稿', async ({ page, replay }) => {
   replay.state.projects[0].defaultParticipantIds = ['chen'];
   await creation(page, '按新项目人员安排工作');
+  await openTaskAdvanced(page);
   await page.getByRole('radio', { name: '从空白开始' }).check();
   await button(page, '新建项目').click();
   await page.getByLabel('项目名称', { exact: true }).fill('新协作项目');
@@ -125,7 +136,30 @@ test('普通新建项目仍进入项目详情，不打开任务草稿', async ({
   expect(requests(replay, 'command').map((r) => r.command.type)).toEqual(['save-project']);
 });
 
-test('默认从目标创建一次并直达规划，结果可应用编辑；刷新和重开不调用模型', async ({
+test('创建任务默认从空白开始，主路径只留目标与项目', async ({ page, replay }) => {
+  await creation(page, '先留下可编辑草稿');
+  const dialog = page.getByRole('dialog', { name: '创建任务', exact: true });
+  await expect(dialog.locator('.zm-create-advanced')).not.toHaveAttribute('open');
+  await expect(dialog.locator('.zm-create-advanced summary')).toContainText('从空白开始');
+  await expect(dialog.locator('input[name="planning-mode"][value="manual"]')).toBeChecked();
+  await expect(dialog.getByLabel('所属项目', { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel('任务名称', { exact: true })).toBeHidden();
+  await expect(button(dialog, '创建工作流')).toBeVisible();
+  await expect(button(dialog, '生成计划')).toHaveCount(0);
+  await openTaskAdvanced(page);
+  await expect(page.getByRole('radio', { name: 'AI 规划', exact: true })).toBeEnabled();
+  await expect(page.getByRole('radio', { name: '使用工作流', exact: true })).toBeEnabled();
+  await page.getByRole('radio', { name: 'AI 规划', exact: true }).check();
+  await expect(button(dialog, '生成计划')).toBeVisible();
+  await page.getByRole('radio', { name: '从空白开始', exact: true }).check();
+  await expect(button(dialog, '创建工作流')).toBeVisible();
+  await button(dialog, '创建工作流').click();
+  await expect(page.getByLabel('任务标题', { exact: true })).toHaveValue('先留下可编辑草稿');
+  expect(requests(replay, 'plan')).toHaveLength(0);
+  expect(requests(replay, 'command')).toHaveLength(1);
+});
+
+test('选择 AI 规划后从目标创建一次并直达规划，结果可应用编辑；刷新和重开不调用模型', async ({
   page,
   replay,
 }) => {
@@ -137,7 +171,8 @@ test('默认从目标创建一次并直达规划，结果可应用编辑；刷�
   };
   try {
     await creation(page, '新增订单状态筛选和 CSV 导出', '/?strict=1');
-    await expect(page.getByRole('radio', { name: /^AI 规划/ })).toBeChecked();
+    await chooseAiPlanning(page);
+    await expect(button(page, '生成计划')).toBeVisible();
     await button(page, '选择参与者').click();
     const picker = page.getByRole('dialog', { name: '选择参与者', exact: true });
     await expect(picker).not.toContainText('全部通过后交接');
@@ -200,6 +235,7 @@ test('规划失败保留同一草稿和参与者，重试不新建；取消迟�
   };
   try {
     await creation(page, '订单失败恢复验证');
+    await chooseAiPlanning(page);
     await button(page, '生成计划').click();
     await expect(page.getByRole('alert')).toContainText('模型暂时不可用');
     const task = structuredClone(replay.state.tasks.at(-1));
@@ -249,6 +285,7 @@ test('创建失败不启动规划；重试复用请求和任务；离开待规�
   };
   try {
     await creation(page, '创建重试不会重复任务');
+    await chooseAiPlanning(page);
     await button(page, '生成计划').click();
     await expect(page.getByRole('dialog').getByRole('alert')).toContainText('保存响应中断');
     await expect(page.getByLabel('任务目标', { exact: true })).toHaveValue('创建重试不会重复任务');
@@ -277,6 +314,7 @@ test('创建失败不启动规划；重试复用请求和任务；离开待规�
 test('没有可用参与者时先提示；自定义路径可以创建且不调用模型', async ({ page, replay }) => {
   replay.state.participants = [];
   await creation(page, '人工整理交付说明');
+  await chooseAiPlanning(page);
   await button(page, '生成计划').click();
   await expect(page.getByRole('dialog').getByRole('alert')).toContainText('至少选择一位');
   expect(requests(replay, 'command')).toHaveLength(0);
@@ -348,6 +386,7 @@ test('创建保存期间卸载并重挂载：迟到响应仅保留草稿，下�
   replay.handlers.plan = async (payload) => proposal(payload);
   try {
     await creation(page, '切出前保存的草稿', '/?strict=1&mount-probe=1');
+    await chooseAiPlanning(page);
     await button(page, '生成计划').click();
     await expect.poll(() => count).toBe(1);
     // Simulate the host replacing its active panel, outside the native modal's pointer scope.
@@ -365,6 +404,7 @@ test('创建保存期间卸载并重挂载：迟到响应仅保留草稿，下�
     expect(replay.state.tasks.filter((t) => t.title === '切出前保存的草稿')).toHaveLength(1);
     await button(page, '＋ 创建任务').click();
     await page.getByLabel('任务目标', { exact: true }).fill('重新进入后的明确新任务');
+    await chooseAiPlanning(page);
     await button(page, '生成计划').click();
     await expect(button(page, '应用草案')).toBeEnabled();
     expect(requests(replay, 'plan')).toHaveLength(1);
