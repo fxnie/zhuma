@@ -2251,21 +2251,27 @@ html[data-platform='darwin'] .zhuma .zm-space-bar {
 }
 .zm-goal summary {
   cursor: pointer;
-  display: flex;
-  gap: 16px;
-  align-items: baseline;
+  display: block;
   list-style: none;
 }
+.zm-goal summary::-webkit-details-marker {
+  display: none;
+}
 .zm-goal summary > span {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
 }
 .zm-goal summary b {
-  flex: none;
+  display: block;
+  width: fit-content;
+  margin-top: 6px;
   font-weight: 400;
   font-size: 12px;
+  line-height: 1.4;
 }
 .zm-goal[open] summary {
   margin-bottom: 12px;
