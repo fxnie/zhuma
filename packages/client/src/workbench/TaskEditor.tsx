@@ -72,6 +72,7 @@ export function TaskEditor({
   saved,
   close,
   appearance,
+  themeShortcut = false,
   initialPlanning,
   backLabel = '任务清单',
   openWork,
@@ -86,6 +87,8 @@ export function TaskEditor({
   saved(state: Workbench): void;
   close(): void;
   appearance: AppearanceStore;
+  /** Host settings own theme. Shells without that page may opt in. */
+  themeShortcut?: boolean;
   initialPlanning?: InitialPlanning;
   backLabel?: string;
   openWork?: () => void;
@@ -703,7 +706,7 @@ export function TaskEditor({
             保存为工作流
           </Button>
         )}
-        <Appearance store={appearance} />
+        {themeShortcut && <Appearance store={appearance} />}
         {conflict && (
           <Button disabled={busy || planning} onClick={() => void readLatest()}>
             读取最新版本

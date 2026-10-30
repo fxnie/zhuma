@@ -98,7 +98,12 @@ const content = new URL(location.href).searchParams.has('member-account') ? (
 ) : new URL(location.href).searchParams.has('expert-library') ? (
   <WorkbenchPage api={api} initialSection="assets" expertLibrary appearance={appearance} />
 ) : (
-  <WorkbenchPage api={api} initialSection="tasks" appearance={appearance} />
+  <WorkbenchPage
+    api={api}
+    initialSection="tasks"
+    appearance={appearance}
+    {...(new URL(location.href).searchParams.has('theme-shortcut') ? { themeShortcut: true } : {})}
+  />
 );
 createRoot(document.getElementById('root')).render(
   new URL(location.href).searchParams.has('strict') ? <StrictMode>{content}</StrictMode> : content,

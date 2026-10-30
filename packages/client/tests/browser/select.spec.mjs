@@ -71,8 +71,23 @@ test('项目菜单真实展开、搜索与选择；不同可视区不越界', as
   expect(replay.requests.filter((r) => r.endpoint !== 'snapshot')).toHaveLength(0);
 });
 
-test('外观菜单键盘选择、取消和外部关闭不保存任务，菜单跟随主题与窗口', async ({ page, replay }) => {
+test('项目顶栏与任务编辑顶栏不提供主题快捷菜单', async ({ page, replay }) => {
   await page.goto('/');
+  const nav = page.getByRole('navigation', { name: '工作台导航' });
+  await nav.getByRole('button', { name: /^项目/ }).click();
+  await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
+  await expect(page.getByLabel('外观', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '刷新', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '＋ 新建项目', exact: true })).toBeVisible();
+  await nav.getByRole('button', { name: /^任务清单/ }).click();
+  await page.getByRole('button', { name: /^订单协作改进/ }).click();
+  await expect(page.getByLabel('外观', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toBeVisible();
+  expect(replay.requests.filter((r) => r.endpoint !== 'snapshot')).toHaveLength(0);
+});
+
+test('显式主题快捷仍可切换且不写任务', async ({ page, replay }) => {
+  await page.goto('/?theme-shortcut=1');
   const appearance = trigger(page, '外观');
   await appearance.focus();
   await page.keyboard.press('ArrowDown');

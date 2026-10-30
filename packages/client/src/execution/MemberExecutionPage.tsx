@@ -35,6 +35,7 @@ function MemberWork({
   spaceUnavailable,
   lifetime,
   appearance,
+  themeShortcut = false,
   view,
   openWork,
   registerLeaveGuard,
@@ -50,6 +51,8 @@ function MemberWork({
   spaceUnavailable(): void;
   lifetime: MemberSpaceLifetime;
   appearance?: AppearanceStore;
+  /** Host settings own theme. Shells without that page may opt in. */
+  themeShortcut?: boolean;
   registerWorkspaceDirectory?: RegisterWorkspaceDirectory | undefined;
   localDirectory?: LocalWorkspaceDirectory | undefined;
   openModelSettings?: (() => void) | undefined;
@@ -202,6 +205,7 @@ function MemberWork({
             api={workbench}
             initialSection="tasks"
             appearance={appearance}
+            {...(themeShortcut ? { themeShortcut: true } : {})}
             knowledge={{ ...knowledgeApi, actorId: accountId, spaceId, lifetime }}
             {...(nativeExecution ? { nativeRun } : {})}
             projectExecution={projectContext}
@@ -233,6 +237,7 @@ export function MemberExecutionPage({
   shell,
   pageKey,
   workbenchAppearance,
+  themeShortcut = false,
   view,
   openWork,
   registerWorkspaceDirectory,
@@ -247,6 +252,8 @@ export function MemberExecutionPage({
   /** Official slots may retain hidden panels; only this panel owns its UI lifetime. */
   pageKey?: string;
   workbenchAppearance?: AppearanceStore;
+  /** Host settings own theme. Shells without that page may opt in. */
+  themeShortcut?: boolean;
   view?: 'catalog' | 'work';
   openWork?: () => void;
   registerWorkspaceDirectory?: RegisterWorkspaceDirectory | undefined;
@@ -337,6 +344,7 @@ export function MemberExecutionPage({
                 nativeExecution={nativeExecution}
                 memberNative={memberNative}
                 {...(workbenchAppearance ? { appearance: workbenchAppearance } : {})}
+                {...(themeShortcut ? { themeShortcut: true } : {})}
               />
             )}
           </MemberSpaceBoundary>

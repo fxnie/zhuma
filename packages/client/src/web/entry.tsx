@@ -144,6 +144,7 @@ function MemberWeb() {
           shell={shell}
           view={view}
           workbenchAppearance={appearance}
+          themeShortcut
           openWork={() => navigate('work')}
           nativeExecution={false}
           allowRegistration

@@ -96,7 +96,7 @@
 
 ## 主题与视觉变量
 
-复用官方 `ctx.theme` 的 `system / light / dark`，默认与持久化均由官方 ui-theme 管理。工作台外观入口调用同一服务；不写独立 localStorage、不监听另一份系统主题，也不重挂载编辑器。官方 ui-layout 将主题投影到 `body[data-ds-dark-theme]`，公共 `--zm-*` 变量据此变化。应用启动的主题预加载仍由官方负责。
+复用官方 `ctx.theme` 的 `system / light / dark`，默认与持久化均由官方 ui-theme 管理。桌面工作台顶栏不放主题快捷，外观以宿主设置为准并调用同一服务；没有该设置页的网页成员壳可以显式挂上 `Appearance`。不写独立 localStorage、不监听另一份系统主题，也不重挂载编辑器。官方 ui-layout 将主题投影到 `body[data-ds-dark-theme]`，公共 `--zm-*` 变量据此变化。应用启动的主题预加载仍由官方负责。
 
 | 用途            | 浅色    | 深色    |
 | --------------- | ------- | ------- |
@@ -114,7 +114,7 @@
 
 正文沿宿主中文系统字体 14px，辅助文字至少 12px，标题 22px；数字/标识使用系统等宽字体。间距 4/8/12/16/24px，控件通常 32/36px，圆角 6/8px。颜色辅助表达状态，名称/图标仍明确人、专家、草稿、已确认和错误。危险操作、加载、焦点、禁用、小地图及画布连线使用语义变量，图片与文件正文不反色。
 
-公共入口：`@zhuma/client/workbench/ui` 导出 `Button / Appearance / Modal / Field / MemberPicker / ParticipantSelect / MultiSelect / ExpandableText`。`Appearance` 只订阅官方偏好，其余组件统一操作等级、表单、选择和可访问名称。字段错误贴近操作，版本冲突保留当前修改并提供显式读取最新版本。小屏将属性栏降级为可关闭抽屉，不压缩画布文字来塞下所有内容。
+公共入口：`@zhuma/client/workbench/ui` 导出 `Button / Appearance / Modal / Field / MemberPicker / ParticipantSelect / MultiSelect / ExpandableText`。`Appearance` 只订阅官方偏好，桌面页头默认不挂载；其余组件统一操作等级、表单、选择和可访问名称。字段错误贴近操作，版本冲突保留当前修改并提供显式读取最新版本。小屏将属性栏降级为可关闭抽屉，不压缩画布文字来塞下所有内容。
 
 ## 操作等级与状态
 
