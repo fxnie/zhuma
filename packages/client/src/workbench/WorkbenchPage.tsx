@@ -74,6 +74,7 @@ export function WorkbenchPage({
   api,
   initialSection,
   appearance,
+  themeShortcut = false,
   expertLibrary = false,
   openWork,
   nativeRun,
@@ -84,6 +85,8 @@ export function WorkbenchPage({
   api: WorkbenchApi;
   initialSection: Section;
   appearance: AppearanceStore;
+  /** Host settings own theme. Shells without that page may opt in. */
+  themeShortcut?: boolean;
   expertLibrary?: boolean;
   openWork?: () => void;
   nativeRun?: { api: NativeRunApi; spaceId: string };
@@ -670,6 +673,7 @@ export function WorkbenchPage({
             setActiveTaskId(null);
           }}
           appearance={appearance}
+          {...(themeShortcut ? { themeShortcut: true } : {})}
           progress={progressFor(activeTask.id)}
           refreshProgress={progress.refresh}
           backLabel={activeProject ? '项目' : '任务清单'}
@@ -704,7 +708,7 @@ export function WorkbenchPage({
               </span>
             </div>
             <div className="zm-actions">
-              <Appearance store={appearance} />
+              {themeShortcut && <Appearance store={appearance} />}
               <Button variant="quiet" onClick={() => void refresh()}>
                 刷新
               </Button>

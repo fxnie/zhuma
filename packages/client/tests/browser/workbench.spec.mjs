@@ -62,18 +62,17 @@ test('创建任务、分工和多人评审配置可保存并在刷新后重开',
 
 test('主题切换保留节点草稿、选择和画布位置，不触发保存或规划', async ({ page, replay }) => {
   await openTask(page);
+  await expect(page.getByLabel('外观', { exact: true })).toHaveCount(0);
   await page.getByLabel('节点名称', { exact: true }).fill('尚未保存的节点修改');
   await expect(page.locator('.react-flow__node.selected')).toHaveCount(1);
   const transform = await page.locator('.react-flow__viewport').getAttribute('style');
   const before = replay.requests.length;
-  for (const theme of ['dark', 'light', 'system']) {
-    await page.getByLabel('外观', { exact: true }).click();
-    const caption = { light: '浅色', dark: '深色', system: '跟随系统' }[theme];
-    await page.getByRole('option', { name: caption, exact: true }).click();
-    await expect(page.getByLabel('外观', { exact: true })).toHaveAttribute(
-      'title',
-      `外观：${caption}`,
-    );
+  for (const dark of [true, false, true]) {
+    await page.evaluate((isDark) => {
+      document.body.toggleAttribute('data-ds-dark-theme', isDark);
+    }, dark);
+    if (dark) await expect(page.locator('body')).toHaveAttribute('data-ds-dark-theme', '');
+    else await expect(page.locator('body')).not.toHaveAttribute('data-ds-dark-theme');
     await expect(page.getByLabel('节点名称', { exact: true })).toHaveValue('尚未保存的节点修改');
     await expect(page.locator('.react-flow__node.selected')).toHaveAttribute('data-id', 'node-0');
     await expect(page.locator('.react-flow__viewport')).toHaveAttribute('style', transform);
