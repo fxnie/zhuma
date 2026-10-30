@@ -10,6 +10,7 @@ async function setup(page) {
   await expect(spacePicker(page)).toHaveAttribute('title', '个人 · 我的空间');
   await expect(page.getByText('现在没有需要你处理的工作。', { exact: true })).toBeVisible();
   await expect(page.getByText('暂无待开始的计划', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '待开始', exact: true })).toBeVisible();
 }
 async function chooseSpace(page, name) {
   await spacePicker(page).click();
@@ -85,6 +86,7 @@ test('formal spaces: personal/team empty states and task data follow the explici
   await chooseSpace(page, '团队 · 新建团队');
   await expect(page.getByText('现在没有需要你处理的工作。', { exact: true })).toBeVisible();
   await expect(page.getByText('暂无待开始的计划', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '待开始', exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toHaveCount(0);
   const queries = [...(await calls(page, 'inbox')), ...(await calls(page, 'startable'))];
   expect(

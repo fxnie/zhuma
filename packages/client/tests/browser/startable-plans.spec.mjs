@@ -14,6 +14,7 @@ const alternatives = {
 async function setup(page, formal = false) {
   await page.goto(`/?startable-plans&strict${formal ? '&formal' : ''}`);
   await expect(picker(page)).toBeEnabled();
+  await expect(page.getByRole('heading', { name: '待开始 4', exact: true })).toBeVisible();
 }
 async function choose(page, name) {
   await picker(page).click();
@@ -272,5 +273,6 @@ test('a catalog revision replacement clears the old selection and never silently
   await button(page, '开始执行').click();
   await finish(page, 'start-plan');
   await expect(page.getByText('暂无待开始的计划', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '待开始', exact: true })).toBeVisible();
   expect(await page.evaluate(() => window.startableProbe.events)).toBe(1);
 });

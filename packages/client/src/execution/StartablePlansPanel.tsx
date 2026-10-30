@@ -96,7 +96,9 @@ function CatalogPanel({ api, onStarted }: Props) {
       <div className="zm-page-heading">
         <h2 id={heading}>
           待开始{' '}
-          {catalog.kind === 'ready' && <span className="zm-kind">{catalog.plans.length}</span>}
+          {catalog.kind === 'ready' && catalog.plans.length > 0 && (
+            <span className="zm-kind">{catalog.plans.length}</span>
+          )}
         </h2>
         <Button
           variant="quiet"

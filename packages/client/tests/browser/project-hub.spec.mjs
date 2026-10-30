@@ -61,10 +61,11 @@ test('项目四入口同源展示，任务返回原项目位置，成果状态�
   await expect(page.getByText('旧版说明')).toBeVisible();
   await screenshot(page, 'materials', info);
   await button(navigation, '成员').click();
+  await expect(page.getByRole('heading', { name: '默认参与者 2', exact: true })).toBeVisible();
   await expect(
     page
       .locator('.zm-project-panel')
-      .filter({ has: page.getByRole('heading', { name: /^默认参与者/ }) }),
+      .filter({ has: page.getByRole('heading', { name: '默认参与者 2', exact: true }) }),
   ).toContainText('质量专家');
   await expect(page.getByRole('heading', { name: '任务中的其他参与者 1' })).toBeVisible();
   await button(page, '刷新').click();
