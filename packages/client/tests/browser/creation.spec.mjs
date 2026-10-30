@@ -333,6 +333,54 @@ test('任务信息栏负责人同行，小屏长姓名整组换行；空值、�
   expect(requests(replay, 'plan')).toHaveLength(0);
 });
 
+test('长需求摘要换行占满宽度，「需求详情」另起一行且不与正文粘连截断', async ({ page, replay }) => {
+  const goal =
+    '选中某条提示后，折叠的导航条会停在这一条上，不再留在整段历史的中部。展开的卡片和折叠后的短刻度共用同一个列表。卡片按 28px 一行把悬停项留在原位，避免正文和入口粘在同一行里被截断。';
+  replay.state.tasks[0].goal = goal;
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto('/');
+  await page.getByRole('button', { name: /^订单协作改进/ }).click();
+  const summary = page.locator('.zm-goal summary');
+  const text = summary.locator('span');
+  const entry = summary.locator('b');
+  await expect(entry).toHaveText('需求详情');
+  await expect(text).toContainText('把悬停项留在原位');
+  const measure = () =>
+    summary.evaluate((node) => {
+      const preview = node.querySelector('span');
+      const action = node.querySelector('b');
+      const previewBox = preview.getBoundingClientRect();
+      const actionBox = action.getBoundingClientRect();
+      const summaryBox = node.getBoundingClientRect();
+      return {
+        separated: actionBox.top >= previewBox.bottom - 1,
+        fullWidth: previewBox.width > summaryBox.width - 4,
+        inside: actionBox.right <= summaryBox.right + 1,
+        overflow: preview.scrollWidth - preview.clientWidth,
+        previewWidth: Math.round(previewBox.width),
+        summaryWidth: Math.round(summaryBox.width),
+        previewBottom: Math.round(previewBox.bottom),
+        actionTop: Math.round(actionBox.top),
+      };
+    });
+  const wide = await measure();
+  expect(wide.separated, JSON.stringify(wide)).toBe(true);
+  expect(wide.fullWidth, JSON.stringify(wide)).toBe(true);
+  expect(wide.inside, JSON.stringify(wide)).toBe(true);
+  expect(wide.overflow, JSON.stringify(wide)).toBeLessThanOrEqual(1);
+  expect(await text.innerText()).not.toContain('需求详情');
+  await entry.click();
+  await expect(page.getByLabel('任务目标', { exact: true })).toHaveValue(goal);
+  await page.setViewportSize({ width: 860, height: 820 });
+  const narrow = await measure();
+  expect(narrow.separated, JSON.stringify(narrow)).toBe(true);
+  expect(narrow.fullWidth, JSON.stringify(narrow)).toBe(true);
+  expect(narrow.inside, JSON.stringify(narrow)).toBe(true);
+  expect(narrow.overflow, JSON.stringify(narrow)).toBeLessThanOrEqual(1);
+  expect(requests(replay, 'command')).toHaveLength(0);
+  expect(requests(replay, 'plan')).toHaveLength(0);
+});
+
 test('创建保存期间卸载并重挂载：迟到响应仅保留草稿，下一次明确创建才规划', async ({
   page,
   replay,
