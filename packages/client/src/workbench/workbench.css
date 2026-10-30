@@ -2983,12 +2983,6 @@ html[data-platform='darwin'] .zhuma .zm-space-bar {
   background: var(--zm-paper);
   border: 1.5px solid var(--zm-edge);
 }
-.zm-canvas .react-flow__attribution {
-  background: var(--zm-paper);
-}
-.zm-canvas .react-flow__attribution a {
-  color: var(--zm-muted);
-}
 .zm-canvas .react-flow__minimap {
   width: 130px;
   height: 86px;
