@@ -2109,7 +2109,9 @@ html[data-platform='darwin'] .zhuma .zm-space-bar {
 }
 .zm-task-row > span:first-child {
   min-width: 0;
-  overflow-wrap: anywhere;
+  /* Wrap after punctuation and spaces. anywhere hard-breaks inside words and CJK runs. */
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 .zm-task-row small {
   font-size: 12px;
