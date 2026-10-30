@@ -77,6 +77,7 @@ test('主题切换保留节点草稿、选择和画布位置，不触发保存�
     await expect(page.getByLabel('节点名称', { exact: true })).toHaveValue('尚未保存的节点修改');
     await expect(page.locator('.react-flow__node.selected')).toHaveAttribute('data-id', 'node-0');
     await expect(page.locator('.react-flow__viewport')).toHaveAttribute('style', transform);
+    await expect(page.locator('.zm-canvas .react-flow__attribution')).toHaveCount(0);
     await expect(button(page, '保存草稿')).toBeEnabled();
   }
   expect(replay.requests).toHaveLength(before);

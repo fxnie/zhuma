@@ -14,6 +14,9 @@ import {
 import type { WorkTask, Workflow, Participant } from '@zhuma/agent-core';
 import { visibleWorkflows, workflowPath, type WorkTree } from './navigation.js';
 
+// Product canvas omits the corner attribution through the library's supported option.
+const flowProOptions = { hideAttribution: true };
+
 export function WorkflowCanvas({
   workflow,
   members,
@@ -234,6 +237,7 @@ export function WorkflowCanvas({
       <ReactFlow
         nodes={nodes}
         edges={edges}
+        proOptions={flowProOptions}
         minZoom={0.15}
         maxZoom={1.8}
         onInit={(instance) => {
