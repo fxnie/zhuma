@@ -273,9 +273,7 @@ export function ProjectHub({
           <div className="zm-project-overview">
             <section className="zm-project-panel">
               <header>
-                <h2>
-                  最近更新的工作 <small>{tasks.length}</small>
-                </h2>
+                <h2>最近更新的工作 {tasks.length > 0 && <small>{tasks.length}</small>}</h2>
                 <Button variant="quiet" onClick={() => changeTab('work')}>
                   查看全部
                 </Button>
@@ -294,9 +292,7 @@ export function ProjectHub({
             <aside>
               <section className="zm-project-panel">
                 <header>
-                  <h2>
-                    默认参与者 <small>{people.length}</small>
-                  </h2>
+                  <h2>默认参与者 {people.length > 0 && <small>{people.length}</small>}</h2>
                   <Button variant="quiet" onClick={() => changeTab('people')}>
                     管理
                   </Button>
@@ -341,9 +337,7 @@ export function ProjectHub({
       {tab === 'work' && (
         <section className="zm-project-panel">
           <header>
-            <h2>
-              项目工作 <small>{tasks.length}</small>
-            </h2>
+            <h2>项目工作 {tasks.length > 0 && <small>{tasks.length}</small>}</h2>
             <input
               type="search"
               aria-label="搜索项目工作"
@@ -464,9 +458,7 @@ export function ProjectHub({
         <div className="zm-project-materials">
           <section className="zm-project-panel">
             <header>
-              <h2>
-                默认参与者 <small>{people.length}</small>
-              </h2>
+              <h2>默认参与者 {people.length > 0 && <small>{people.length}</small>}</h2>
               <Button disabled={!canEdit} onClick={edit}>
                 更改默认参与者
               </Button>
