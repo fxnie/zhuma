@@ -8,6 +8,10 @@ async function openTask(page) {
   await page.goto('/');
   await page.getByRole('button', { name: /^订单协作改进/ }).click();
 }
+async function openTaskAdvanced(page) {
+  const advanced = page.locator('.zm-create-advanced');
+  if ((await advanced.getAttribute('open')) === null) await advanced.locator('summary').click();
+}
 async function selectPeople(page, label, names) {
   await button(page, `选择${label}`).click();
   const dialog = page.getByRole('dialog', { name: `选择${label}`, exact: true });
@@ -25,6 +29,7 @@ async function selectPeople(page, label, names) {
 test('创建任务、分工和多人评审配置可保存并在刷新后重开', async ({ page, replay }) => {
   await page.goto('/');
   await button(page, '＋ 创建任务').click();
+  await openTaskAdvanced(page);
   await page.getByLabel('任务名称', { exact: true }).fill('订单导出字段核对');
   await page.getByLabel('任务目标', { exact: true }).fill('明确字段和角色范围，再交付接口定义。');
   // Escape cancels the inner selection, without closing or changing the outer draft.
@@ -296,6 +301,7 @@ test('创建任务长表单支持滚轮和 Tab 到末项，操作区不随焦点
   await page.setViewportSize({ width: 720, height: 450 });
   await page.goto('/');
   await button(page, '＋ 创建任务').click();
+  await openTaskAdvanced(page);
   const dialog = page.getByRole('dialog');
   const body = dialog.locator('.zm-form-body');
   const footer = dialog.locator('footer');
@@ -304,7 +310,9 @@ test('创建任务长表单支持滚轮和 Tab 到末项，操作区不随焦点
   expect(Math.abs(initial.y + initial.height - (bounds.y + bounds.height - 1))).toBeLessThan(2);
   await body.hover({ position: { x: 4, y: 20 } });
   await page.mouse.wheel(0, 1200);
-  await expect.poll(() => body.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  await expect
+    .poll(() => body.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop))
+    .toBeLessThan(2);
   const owner = button(page, '选择任务负责人');
   const ownerBounds = await owner.boundingBox();
   const bodyBounds = await body.boundingBox();

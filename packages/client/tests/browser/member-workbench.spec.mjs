@@ -118,6 +118,9 @@ test('member UI replay: an empty space can create its first project and task wit
   await page.goto('/?member-workbench&strict');
   await button(page, '＋ 创建任务').click();
   await page.getByLabel('任务目标', { exact: true }).fill('整理客户需求');
+  await expect(page.locator('.zm-create-advanced')).not.toHaveAttribute('open');
+  await expect(page.locator('.zm-create-advanced summary')).toContainText('从空白开始');
+  await page.locator('.zm-create-advanced summary').click();
   await expect(page.getByRole('radio', { name: 'AI 规划', exact: true })).toBeDisabled();
   await expect(page.getByRole('radio', { name: '从空白开始' })).toBeChecked();
   await button(page, '先创建项目').click();
