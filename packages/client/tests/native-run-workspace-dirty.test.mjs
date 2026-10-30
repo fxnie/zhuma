@@ -259,9 +259,27 @@ if (!domModule) {
       await click('看板');
       assert.equal(node.querySelectorAll('.zm-board-card').length, 1);
       assert.equal(node.querySelector('.zm-board-card strong').textContent, title);
-      assert.ok(node.querySelector('.zm-task-filter-summary').textContent.includes('1 / 2'));
+      const summary = node.querySelector('.zm-task-filter-summary');
+      assert.ok(summary.textContent.includes('1 / 2'));
+      assert.ok(summary.classList.contains('is-filtering'));
+      assert.equal(summary.querySelector('.zm-filter-flag')?.textContent, '已筛选');
+      const activeSelects = [
+        ...node.querySelectorAll('.zm-task-filters .zm-single-select.is-filtering'),
+      ];
+      assert.deepEqual(
+        activeSelects.map((item) => item.getAttribute('aria-label')),
+        ['筛选阶段'],
+      );
       await click('清除筛选');
       assert.equal(node.querySelectorAll('.zm-board-card').length, 2);
+      assert.equal(node.querySelector('.zm-task-filter-summary.is-filtering'), null);
+      assert.equal(node.querySelector('.zm-filter-flag'), null);
+      assert.equal(node.querySelectorAll('.zm-single-select.is-filtering').length, 0);
+      assert.ok(node.querySelector('.zm-task-filter-summary').textContent.includes('2 / 2'));
+      assert.equal(
+        node.querySelector('.zm-task-filter-summary').textContent.includes('已筛选'),
+        false,
+      );
       await render(makeApi('bob'), 'south');
       assert.equal(node.querySelectorAll('.zm-board-card').length, 0);
       assert.equal(node.querySelectorAll('.zm-task-row').length, 2);

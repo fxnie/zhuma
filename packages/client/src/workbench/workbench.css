@@ -4801,6 +4801,78 @@ html[data-platform='darwin'] .zhuma .zm-space-bar {
   color: var(--zm-muted);
   font-size: 12px;
 }
+.zhuma .zm-task-filters > .zm-single-select.is-filtering,
+.zhuma .zm-task-filters > .zm-single-select.is-filtering:hover,
+.zhuma .zm-task-filters > .zm-single-select.is-filtering:active {
+  border-color: var(--zm-button-primary);
+  background: var(--zm-button-primary);
+  color: var(--zm-button-on-primary);
+  font-weight: 600;
+}
+.zhuma .zm-task-filters > .zm-single-select.is-filtering:hover {
+  border-color: var(--zm-button-primary-hover);
+  background: var(--zm-button-primary-hover);
+}
+.zhuma .zm-task-filters > .zm-single-select.is-filtering:active {
+  border-color: var(--zm-button-primary-pressed);
+  background: var(--zm-button-primary-pressed);
+}
+.zhuma .zm-page-bar .zm-task-filters > input.is-filtering,
+.zhuma .zm-page-bar .zm-task-filters > input.is-filtering:hover {
+  border-color: var(--zm-button-primary);
+  background: var(--zm-paper);
+  color: var(--zm-ink);
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--zm-button-primary);
+}
+.zm-filter-flag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: var(--zm-button-primary);
+  color: var(--zm-button-on-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.zm-filter-count {
+  font-variant-numeric: tabular-nums;
+}
+.zm-task-filter-summary.is-filtering {
+  color: var(--zm-ink);
+  font-size: 13px;
+}
+.zm-task-filter-summary.is-filtering .zm-filter-count {
+  display: inline-flex;
+  align-items: baseline;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--zm-line-strong);
+  border-radius: 7px;
+  background: var(--zm-paper);
+  color: var(--zm-ink);
+  font-weight: 600;
+  box-shadow: 0 0 0 3px var(--zm-soft);
+}
+.zm-task-filter-summary.is-filtering .zm-filter-count strong {
+  font-size: 15px;
+  font-weight: 700;
+}
+.zm-task-filter-summary.is-filtering .zm-filter-clear,
+.zm-task-filter-summary.is-filtering .zm-filter-clear:hover,
+.zm-task-filter-summary.is-filtering .zm-filter-clear:active {
+  border-color: var(--zm-line-strong);
+  background: var(--zm-paper);
+  color: var(--zm-ink);
+  font-weight: 600;
+  box-shadow: none;
+}
+.zm-task-filter-summary.is-filtering .zm-filter-clear:hover {
+  border-color: var(--zm-ink);
+  background: var(--zm-hover);
+}
 .zm-planning-readiness {
   display: flex;
   align-items: flex-start;

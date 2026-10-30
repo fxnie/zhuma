@@ -642,6 +642,9 @@ export function WorkbenchPage({
     (task) => !taskFilters.stage || stageFor(task) === taskFilters.stage,
   );
   const stageLoading = taskCandidates.some((task) => progressFor(task.id)?.state === 'loading');
+  const taskListFiltered = Boolean(
+    projectFilter || participantFilter || taskFilters.stage || taskFilters.search,
+  );
   if (loading)
     return (
       <div className="zhuma zm-loading" role="status">
@@ -788,6 +791,7 @@ export function WorkbenchPage({
               <div className="zm-filter zm-task-filters">
                 <input
                   aria-label="搜索任务"
+                  className={taskFilters.search ? 'is-filtering' : undefined}
                   placeholder="搜索任务…"
                   maxLength={200}
                   value={taskFilters.search}
@@ -795,6 +799,7 @@ export function WorkbenchPage({
                 />
                 <SingleSelect
                   label="筛选参与者"
+                  className={participantFilter ? 'is-filtering' : ''}
                   value={participantFilter}
                   popupMinWidth={240}
                   onValueChange={(participantId) =>
@@ -810,6 +815,7 @@ export function WorkbenchPage({
                 />
                 <SingleSelect
                   label="筛选阶段"
+                  className={taskFilters.stage ? 'is-filtering' : ''}
                   value={taskFilters.stage}
                   popupMinWidth={200}
                   onValueChange={(stage) =>
@@ -825,6 +831,7 @@ export function WorkbenchPage({
                 />
                 <SingleSelect
                   label="筛选项目"
+                  className={projectFilter ? 'is-filtering' : ''}
                   value={projectFilter}
                   onValueChange={setProjectFilter}
                   options={[
@@ -832,17 +839,22 @@ export function WorkbenchPage({
                     ...state.projects.map((p) => ({ value: p.id, label: p.name })),
                   ]}
                 />
-                <div className="zm-task-filter-summary" role="status">
-                  <span>
-                    {tasks.length} / {state.tasks.length} 项任务
+                <div
+                  className={`zm-task-filter-summary${taskListFiltered ? ' is-filtering' : ''}`}
+                  role="status"
+                >
+                  {taskListFiltered && <span className="zm-filter-flag">已筛选</span>}
+                  <span className="zm-filter-count">
+                    {taskListFiltered ? <strong>{tasks.length}</strong> : tasks.length}
+                    {' / '}
+                    {state.tasks.length}
+                    {' 项任务'}
                     {stageLoading ? ' · 正在读取阶段…' : ''}
                   </span>
-                  {(projectFilter ||
-                    participantFilter ||
-                    taskFilters.stage ||
-                    taskFilters.search) && (
+                  {taskListFiltered && (
                     <Button
                       variant="quiet"
+                      className="zm-filter-clear"
                       onClick={() => setTaskFilters({ ...emptyTaskFilters, view: taskView })}
                     >
                       清除筛选
