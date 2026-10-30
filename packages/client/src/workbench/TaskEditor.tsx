@@ -6,12 +6,14 @@ import {
   resolveTemplateBindings,
   templateBindingGaps,
   comparePlanningWorkflows,
+  validateLocalPlanningChange,
   LOCAL_PLANNING_FIELDS,
   type Workbench,
   type WorkTask,
   type Workflow,
   type WorkNode,
   type PlanProposal,
+  type PlanningAdjustment,
   type WorkflowTemplate,
 } from '@zhuma/agent-core';
 import type { WorkbenchApi } from './api.js';
@@ -26,6 +28,17 @@ import { TemplateSaveDialog } from './TemplateSaveDialog.js';
 import { TemplateBindings, type TemplateBindingValues } from './TemplateBindings.js';
 import { SingleSelect } from './SingleSelect.js';
 import { PlanningChanges } from './PlanningChanges.js';
+import { ControlIcon } from './ControlIcon.js';
+import { useUnsavedChanges } from './UnsavedChanges.js';
+import { PlanningReadiness, usePlanningReadiness } from './PlanningReadiness.js';
+import { useLeaveConfirmation } from './useLeaveConfirmation.js';
+import { NativeRunLauncher } from '../run/NativeRunWorkspace.js';
+import type { NativeRunApi } from '../run/api.js';
+import { WorkflowControls } from '../workflow/WorkflowControls.js';
+import type { WorkflowView } from '../workflow/api.js';
+import { latestTaskPlan, type TaskProgressState } from '../execution/useTaskProgress.js';
+import { TaskProgressSummary } from '../execution/TaskProgressSummary.js';
+import { expertResources, prepareExpertProposal } from './expert-resources.js';
 
 // Started only by the create-form submit handler. The parent owns cancellation on task exit.
 export type InitialPlanning = {
@@ -61,6 +74,10 @@ export function TaskEditor({
   appearance,
   initialPlanning,
   backLabel = '任务清单',
+  openWork,
+  nativeRun,
+  progress,
+  refreshProgress,
 }: {
   original: WorkTask;
   state: Workbench;
@@ -71,8 +88,14 @@ export function TaskEditor({
   appearance: AppearanceStore;
   initialPlanning?: InitialPlanning;
   backLabel?: string;
+  openWork?: () => void;
+  nativeRun?: { api: NativeRunApi; spaceId: string };
+  progress?: TaskProgressState | undefined;
+  refreshProgress?: (() => void) | undefined;
 }) {
   const [task, setTask] = useState(() => structuredClone(original));
+  const planningReadiness = usePlanningReadiness(api, model);
+  const [workflowView, setWorkflowView] = useState<WorkflowView>();
   const [baseline, setBaseline] = useState(() => JSON.stringify(original));
   const [revision, setRevision] = useState(state.revision);
   const [workflowId, setWorkflowId] = useState(original.workflows.find((w) => !w.parentNodeId)!.id);
@@ -131,6 +154,8 @@ export function TaskEditor({
   const [planFailed, setPlanFailed] = useState(false);
   const [instruction, setInstruction] = useState('');
   const [proposal, setProposal] = useState<PlanProposal | null>(null);
+  const planningCatalog = useRef({ task, members: state.participants, assets: state.assets });
+  planningCatalog.current = { task, members: state.participants, assets: state.assets };
   const [adjustmentScope, setAdjustmentScope] = useState<'all' | 'node' | 'assignment'>('all');
   const [previewOriginal, setPreviewOriginal] = useState(false);
   const [comparison, setComparison] = useState(() => ({
@@ -145,6 +170,40 @@ export function TaskEditor({
     task: WorkTask;
   } | null>(null);
   const dirty = JSON.stringify(task) !== baseline;
+  const applied = latestTaskPlan(state.appliedPlans, task.id);
+  const workflowFacts = useRef('');
+  function updateWorkflowView(next: WorkflowView) {
+    setWorkflowView(next);
+    const facts = JSON.stringify([
+      next.target,
+      next.state,
+      next.planStarted,
+      next.activeRunCount,
+      next.intent,
+    ]);
+    if (workflowFacts.current !== facts) {
+      workflowFacts.current = facts;
+      refreshProgress?.();
+    }
+  }
+  const fixedNode = applied?.task.workflows
+    .flatMap((flow) => flow.nodes)
+    .find((node) => node.id === selectedId);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const memberCapability = api.member
+    ?.capabilities()
+    ?.tasks.find((item) => item.taskId === task.id);
+  const canEdit = !api.member || memberCapability?.edit === true;
+  const canConfirm = !api.member || memberCapability?.confirm === true;
+  const canPlan = !api.member || memberCapability?.plan === true;
+  useUnsavedChanges(dirty || busy || planning || !!proposal);
+  const leaveConfirmation = useLeaveConfirmation(() => alive.current);
   const previewTask = useMemo(
     () =>
       proposal?.result.workflows.length ? { ...task, workflows: proposal.result.workflows } : null,
@@ -164,7 +223,7 @@ export function TaskEditor({
     [comparison.workflows, proposal],
   );
   const workTree = useMemo(() => indexWorkTree(displayTask), [displayTask]);
-  const locked = busy || planning || task.status === 'ready' || !!previewTask;
+  const locked = busy || planning || task.status === 'ready' || !!previewTask || !canEdit;
   const workflow = workTree.workflows.get(workflowId) ?? workTree.root;
   const node = workflow.nodes.find((n) => n.id === selectedId);
   const ancestors = workflowPath(workTree, workflow.id);
@@ -199,7 +258,24 @@ export function TaskEditor({
   }, [workTree, workflowId, selectedId]);
   const gaps = templateBindingGaps(task);
   const hasGaps = !!(gaps.participants.length + gaps.assets.length);
-  const actualMembers = state.participants.filter((m) => task.participantIds.includes(m.id));
+  const participantSource =
+    task.status === 'ready' && applied ? applied.participants : state.participants;
+  const actualMembers = useMemo(
+    () => participantSource.filter((m) => task.participantIds.includes(m.id)),
+    [participantSource, task.participantIds],
+  );
+  const proposalMissingResources = useMemo(() => {
+    let count = 0;
+    const examples: string[] = [];
+    for (const flow of proposal?.result.workflows ?? [])
+      for (const node of flow.nodes)
+        for (const resource of expertResources(node, actualMembers, state.assets))
+          if (!resource.available || !resource.selected) {
+            count++;
+            if (examples.length < 3) examples.push(`${node.title}：${resource.name}`);
+          }
+    return { count, examples };
+  }, [proposal, actualMembers, state.assets]);
   const members = [
     ...actualMembers,
     ...gaps.participants.map((p) => ({
@@ -238,8 +314,12 @@ export function TaskEditor({
     void initialPlanning.result.then((result) => {
       if (!subscribed || controller.current !== initialPlanning.controller) return;
       if (initialPlanning.controller.signal.aborted) setMessage('已取消规划');
-      else if (result.ok) setProposal(result.proposal);
-      else {
+      else if (result.ok) {
+        const catalog = planningCatalog.current;
+        setProposal(
+          prepareExpertProposal(result.proposal, catalog.task, catalog.members, catalog.assets),
+        );
+      } else {
         setError(result.error instanceof Error ? result.error.message : '规划失败，请重试。');
         setConflict(result.error instanceof WorkbenchError && result.error.code === 'conflict');
         setPlanFailed(true);
@@ -319,6 +399,12 @@ export function TaskEditor({
       });
   }
   async function persist(next = task, expectedRevision = revision): Promise<Workbench | null> {
+    if (api.member && (next.status === 'ready' ? !canConfirm || dirty : !canEdit)) {
+      setError(
+        next.status === 'ready' && dirty ? '请先保存修改，再确认工作流。' : '当前任务只可查看。',
+      );
+      return null;
+    }
     if (!next.title.trim()) {
       setError('请填写任务标题。');
       return null;
@@ -362,8 +448,16 @@ export function TaskEditor({
         pendingSave.current.revision,
         { type: 'save-task', task: pendingSave.current.task },
         pendingSave.current.requestId,
+        pendingSave.current.task.status === 'ready' ? 'confirm-task' : 'update-task',
       );
-      const committed = result.tasks.find((t) => t.id === next.id)!;
+      if (api.member && !alive.current) return null;
+      const committed = result.tasks.find((t) => t.id === next.id);
+      if (!committed) {
+        saved(result);
+        pendingSave.current = null;
+        close();
+        return result;
+      }
       setTask(structuredClone(committed));
       setBaseline(JSON.stringify(committed));
       setRevision(result.revision);
@@ -374,6 +468,7 @@ export function TaskEditor({
       setConflict(false);
       return result;
     } catch (error) {
+      if (api.member && !alive.current) return null;
       setError(error instanceof Error ? error.message : '保存失败，请重试。');
       setConflict(error instanceof WorkbenchError && error.code === 'conflict');
       return null;
@@ -407,6 +502,10 @@ export function TaskEditor({
     }
   }
   async function generate() {
+    if (!canPlan) {
+      setError('当前任务暂不可使用 AI 规划。');
+      return;
+    }
     if (previewOriginal && proposal) {
       setError('请先切回规划结果，再继续调整。');
       return;
@@ -424,7 +523,7 @@ export function TaskEditor({
       return;
     }
     const result = dirty ? await persist() : state;
-    if (!result) return;
+    if (!result || !result.tasks.some((item) => item.id === task.id)) return;
     setPlanning(true);
     setPlanFailed(false);
     setError('');
@@ -433,6 +532,15 @@ export function TaskEditor({
     controller.current = abort;
     const comparedWorkflows = structuredClone(proposal?.result.workflows ?? task.workflows);
     const comparisonLabel = proposal ? '上一份草案' : '已保存草稿';
+    const adjustment: PlanningAdjustment | undefined = targetNodeId
+      ? {
+          nodeId: targetNodeId,
+          fields:
+            adjustmentScope === 'assignment'
+              ? ['assigneeId', 'rationale']
+              : [...LOCAL_PLANNING_FIELDS],
+        }
+      : undefined;
     // Keep the reviewed proposal available if this replacement fails or is cancelled.
     try {
       const next = await api.plan(
@@ -441,18 +549,22 @@ export function TaskEditor({
         instruction,
         abort.signal,
         proposal?.id,
-        targetNodeId
-          ? {
-              nodeId: targetNodeId,
-              fields:
-                adjustmentScope === 'assignment'
-                  ? ['assigneeId', 'rationale']
-                  : [...LOCAL_PLANNING_FIELDS],
-            }
-          : undefined,
+        adjustment,
       );
       abort.signal.throwIfAborted();
-      setProposal(next);
+      if (api.member && !alive.current) return;
+      const catalog = planningCatalog.current;
+      const prepared = prepareExpertProposal(
+        next,
+        catalog.task,
+        catalog.members,
+        catalog.assets,
+        adjustment,
+      );
+      // Recheck the actual visible baseline after Client preparation, including an unapplied preview.
+      if (adjustment && prepared.result.workflows.length)
+        validateLocalPlanningChange(comparedWorkflows, prepared.result.workflows, adjustment);
+      setProposal(prepared);
       setComparison({ workflows: comparedWorkflows, label: comparisonLabel });
       setPreviewOriginal(false);
     } catch (error) {
@@ -545,34 +657,52 @@ export function TaskEditor({
   }
   return (
     <div className="zm-editor" ref={editorRef}>
+      {leaveConfirmation.dialog}
       <div className="zm-toolbar">
         <button
           className="zm-quiet"
           onClick={() => {
-            if (!dirty || confirm('有未保存的修改，确定离开吗？')) close();
+            if (api.member)
+              leaveConfirmation.request(close, dirty || busy || planning || !!proposal);
+            else if (!dirty || confirm('有未保存的修改，确定离开吗？')) close();
           }}
         >
-          ← {backLabel}
+          <ControlIcon direction="left" /> {backLabel}
         </button>
         <span className="zm-path-divider">/</span>
         <span className="zm-editor-project">
           {state.projects.find((p) => p.id === task.projectId)?.name}
         </span>
         <span className="zm-spacer" />
-        <Button
-          variant="quiet"
-          disabled={busy || planning || !!previewTask || !!pendingSave.current || hasGaps}
-          title={hasGaps ? '先补齐映射，再保存为新工作流' : undefined}
-          onClick={() => {
-            try {
-              setTemplateSave(captureWorkflowTemplate(task, state));
-            } catch (e) {
-              setError(e instanceof Error ? e.message : '请先补齐节点交付内容。');
+        {(!api.member || (api.saveTemplate && task.ownerId === api.member.actorId)) && (
+          <Button
+            variant="quiet"
+            disabled={
+              busy ||
+              planning ||
+              !!previewTask ||
+              !!pendingSave.current ||
+              hasGaps ||
+              (!!api.member && dirty)
             }
-          }}
-        >
-          保存为工作流
-        </Button>
+            title={
+              hasGaps
+                ? '先补齐映射，再保存为新工作流'
+                : api.member && dirty
+                  ? '请先保存任务修改'
+                  : undefined
+            }
+            onClick={() => {
+              try {
+                setTemplateSave(captureWorkflowTemplate(task, state));
+              } catch (e) {
+                setError(e instanceof Error ? e.message : '请先补齐节点交付内容。');
+              }
+            }}
+          >
+            保存为工作流
+          </Button>
+        )}
         <Appearance store={appearance} />
         {conflict && (
           <Button disabled={busy || planning} onClick={() => void readLatest()}>
@@ -583,12 +713,20 @@ export function TaskEditor({
           {dirty ? '未保存' : message || '已保存'}
         </span>
         {task.status === 'ready' ? (
-          <button
-            disabled={busy || planning}
-            onClick={() => void persist({ ...task, status: 'draft' })}
-          >
-            继续编辑
-          </button>
+          api.member ? (
+            openWork && (
+              <Button variant="primary" onClick={openWork}>
+                查看待办
+              </Button>
+            )
+          ) : (
+            <button
+              disabled={busy || planning}
+              onClick={() => void persist({ ...task, status: 'draft' })}
+            >
+              继续编辑
+            </button>
+          )
         ) : (
           <>
             <Button
@@ -602,7 +740,8 @@ export function TaskEditor({
             </Button>
             <button
               className="primary"
-              disabled={locked}
+              disabled={locked || !canConfirm || (!!api.member && dirty)}
+              title={api.member && dirty ? '先保存草稿，再确认工作流' : undefined}
               onClick={() => void persist({ ...task, status: 'ready' })}
             >
               确认工作流
@@ -626,9 +765,15 @@ export function TaskEditor({
         <div className="zm-task-meta">
           <span className={`zm-status ${task.status}`}>
             {task.status === 'ready'
-              ? `已确认 v${state.appliedPlans.filter((p) => p.taskId === task.id).at(-1)?.revision ?? 1} · 待执行接入`
+              ? `计划已确认${applied ? ` v${applied.revision}` : ''}${api.member ? '' : ' · 待执行接入'}`
               : '计划草稿'}
           </span>
+          <TaskProgressSummary progress={progress} confirmed={!!applied} />
+          {applied && refreshProgress && (
+            <Button variant="quiet" onClick={refreshProgress}>
+              刷新进度
+            </Button>
+          )}
           {locked ? (
             <span className="zm-task-owner-readonly">
               <span>负责人</span>
@@ -648,7 +793,12 @@ export function TaskEditor({
           )}
           <Button
             variant="quiet"
-            disabled={busy || planning || !!previewTask}
+            disabled={
+              busy ||
+              planning ||
+              !!previewTask ||
+              (!!api.member && (task.status === 'ready' || !canEdit))
+            }
             onClick={() => {
               setMemberDraft(task.participantIds);
               setMemberError('');
@@ -680,6 +830,35 @@ export function TaskEditor({
           )}
         </details>
       </div>
+      {nativeRun?.api.workflow &&
+        api.member &&
+        (api.member.actorId === task.ownerId ||
+          task.workflows.some((flow) =>
+            flow.nodes.some((node) => node.assigneeId === api.member?.actorId),
+          )) &&
+        task.status === 'ready' &&
+        applied &&
+        !dirty && (
+          <WorkflowControls
+            api={nativeRun.api.workflow}
+            target={{ taskId: task.id, planId: applied.id, revision: applied.revision }}
+            nodeLabels={Object.fromEntries(
+              applied.task.workflows.flatMap((flow) =>
+                flow.nodes.map((node) => [node.id, node.title]),
+              ),
+            )}
+            onViewChange={updateWorkflowView}
+            openModelSettings={nativeRun.api.openModelSettings}
+            workspaceApprovals={
+              nativeRun.api.workspaceApprovals
+                ? {
+                    api: nativeRun.api.workspaceApprovals,
+                    location: { spaceId: nativeRun.spaceId, projectId: task.projectId },
+                  }
+                : undefined
+            }
+          />
+        )}
       {hasGaps && (
         <div className="zm-template-gap-banner" role="status">
           <span>
@@ -734,7 +913,7 @@ export function TaskEditor({
                   if (parent) navigate(parent.id);
                 }}
               >
-                ↑ 上一级
+                <ControlIcon direction="up" /> 上一级
               </button>
             )}
             <span className="zm-spacer" />
@@ -774,6 +953,42 @@ export function TaskEditor({
                 ＋ 节点
               </button>
             )}
+            {nativeRun &&
+              task.status === 'ready' &&
+              !dirty &&
+              applied &&
+              fixedNode &&
+              !applied.task.workflows.some((flow) => flow.parentNodeId === fixedNode.id) &&
+              (!nativeRun.api.workflow ||
+              // Only the task owner has workflow-control facts. Other members
+              // use the original node controller, which reads their own authority
+              // before exposing a start/send action; no plan state is inferred.
+              api.member?.actorId !== task.ownerId ||
+              (workflowView?.target.planId === applied.id &&
+                workflowView.target.revision === applied.revision &&
+                workflowView.planStarted) ? (
+                <NativeRunLauncher
+                  api={nativeRun.api}
+                  target={{
+                    spaceId: nativeRun.spaceId,
+                    taskId: task.id,
+                    planId: applied.id,
+                    revision: applied.revision,
+                    nodeId: fixedNode.id,
+                    title: fixedNode.title,
+                    description: fixedNode.description
+                      ? `${fixedNode.title}\n\n${fixedNode.description}`
+                      : fixedNode.title,
+                  }}
+                />
+              ) : (
+                <Button
+                  disabled
+                  title="请先运行工作流，或前往「查看待办」开始派发后处理分配给你的工作。"
+                >
+                  使用 Agent
+                </Button>
+              ))}
             <button
               className="zm-quiet"
               aria-pressed={inspectorOpen && panel === 'config'}
@@ -807,7 +1022,7 @@ export function TaskEditor({
                   setInspectorOpen(true);
                 }}
               >
-                审阅草案 →
+                审阅草案 <ControlIcon direction="right" />
               </button>
             </div>
           )}
@@ -873,7 +1088,8 @@ export function TaskEditor({
                   <button className="zm-node-main" onClick={() => selectNode(n.id)}>
                     <strong>{n.title}</strong>
                     <span>
-                      {members.find((m) => m.id === n.assigneeId)?.name ?? '未分配'}
+                      {members.find((m) => m.id === n.assigneeId)?.name ??
+                        (n.assigneeId ? '执行者信息未提供' : '未分配')}
                       <i>·</i>
                       {n.dependsOn.length ? `依赖 ${n.dependsOn.length} 个节点` : '无前置依赖'}
                       {displayTask.workflows.some((w) => w.parentNodeId === n.id) &&
@@ -888,14 +1104,14 @@ export function TaskEditor({
                         disabled={locked || i === 0}
                         onClick={() => moveNode(n.id, -1)}
                       >
-                        ↑
+                        <ControlIcon direction="up" />
                       </button>
                       <button
                         aria-label={`下移 ${n.title}`}
                         disabled={locked || i === workflow.nodes.length - 1}
                         onClick={() => moveNode(n.id, 1)}
                       >
-                        ↓
+                        <ControlIcon direction="down" />
                       </button>
                     </div>
                   )}
@@ -1043,6 +1259,7 @@ export function TaskEditor({
           ) : (
             <div className="zm-planner">
               <div className="zm-planner-body">
+                {api.member && <PlanningReadiness value={planningReadiness} />}
                 <details className="zm-planning-context">
                   <summary>
                     <span>规划依据</span>
@@ -1058,7 +1275,7 @@ export function TaskEditor({
                       </li>
                     ))}
                   </ul>
-                  <p>模型：{model}</p>
+                  {!api.member && <p>模型：{model}</p>}
                   <p>模型只读取任务、人员职责和资产定义，不获得工具授权。</p>
                 </details>
                 {!proposal && !planning && (
@@ -1116,6 +1333,15 @@ export function TaskEditor({
                       </summary>
                       <p>{proposal.result.summary}</p>
                     </details>
+                    {!!proposalMissingResources.count && (
+                      <p className="zm-warning" role="status">
+                        必需能力尚未齐备：{proposalMissingResources.examples.join('；')}
+                        {proposalMissingResources.count > 3
+                          ? ` 等 ${proposalMissingResources.count} 项`
+                          : ''}
+                        。可应用为草稿，补齐后才能确认。
+                      </p>
+                    )}
                     {proposal.result.questions.length > 0 && (
                       <div className="zm-questions">
                         <strong>需要你确认</strong>
@@ -1229,6 +1455,7 @@ export function TaskEditor({
                             : undefined
                     }
                     disabled={
+                      !canPlan ||
                       busy ||
                       planning ||
                       conflict ||
@@ -1286,6 +1513,7 @@ export function TaskEditor({
                                 : undefined
                       }
                       disabled={
+                        !canEdit ||
                         busy ||
                         planning ||
                         conflict ||
@@ -1355,6 +1583,7 @@ export function TaskEditor({
         <TemplateSaveDialog
           definition={templateSave}
           initialName={task.title}
+          sourceTaskId={task.id}
           api={api}
           revision={revision}
           close={() => setTemplateSave(null)}

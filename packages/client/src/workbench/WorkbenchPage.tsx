@@ -9,7 +9,8 @@ import {
   type TeamAsset,
   type WorkbenchCommand,
 } from '@zhuma/agent-core';
-import type { WorkbenchApi } from './api.js';
+import type { WorkbenchApi, WorkbenchWriteIntent } from './api.js';
+import { useUnsavedChanges } from './UnsavedChanges.js';
 import { Field, Modal, ParticipantSelect, MultiSelect } from './controls.js';
 import { TaskEditor, type InitialPlanning } from './TaskEditor.js';
 import { Appearance, type AppearanceStore } from './Appearance.js';
@@ -21,6 +22,22 @@ import { TemplateDefinitionEditor } from './TemplateDefinitionEditor.js';
 import { AssetImportDialog } from './AssetImportDialog.js';
 import { ResourceSourceDialog } from './SourceFiles.js';
 import { ExpertBrowser, type ExpertBrowserView } from './ExpertBrowser.js';
+import type { NativeRunApi } from '../run/api.js';
+import { ControlIcon } from './ControlIcon.js';
+import { TaskBoard } from './TaskBoard.js';
+import { taskBoardColumn, taskBoardColumns } from './task-board.js';
+import { emptyTaskFilters, taskFilterCandidates } from './task-filters.js';
+import { useTaskFilters } from './useTaskFilters.js';
+import { PlanningReadiness, usePlanningReadiness } from './PlanningReadiness.js';
+import {
+  latestTaskPlan,
+  useTaskProgress,
+  type TaskProgressState,
+} from '../execution/useTaskProgress.js';
+import { TaskProgressSummary } from '../execution/TaskProgressSummary.js';
+import { KnowledgePanel, type KnowledgePanelProps } from '../knowledge/KnowledgePanel.js';
+import type { ProjectKnowledgeApi } from '../knowledge/project-knowledge-api.js';
+import { useLeaveConfirmation } from './useLeaveConfirmation.js';
 import {
   ProjectHub,
   ProjectFields,
@@ -28,7 +45,7 @@ import {
   type ProjectTab,
 } from './ProjectHub.js';
 
-type Section = 'projects' | 'tasks' | 'assets' | 'members';
+type Section = 'projects' | 'tasks' | 'assets' | 'members' | 'knowledge';
 type Dialog =
   | { kind: 'project'; value: Project }
   | { kind: 'member'; value: Participant }
@@ -36,6 +53,7 @@ type Dialog =
   | {
       kind: 'task';
       value: WorkTask;
+      participantIdsEdited: boolean;
       planning: 'ai' | 'manual' | 'template';
       template: {
         assetId: string;
@@ -49,6 +67,7 @@ const labels: Record<Section, string> = {
   tasks: '任务清单',
   assets: '团队资产',
   members: '成员与专家',
+  knowledge: '知识',
 };
 
 export function WorkbenchPage({
@@ -56,22 +75,61 @@ export function WorkbenchPage({
   initialSection,
   appearance,
   expertLibrary = false,
+  openWork,
+  nativeRun,
+  projectExecution,
+  legacyMode = false,
+  knowledge,
 }: {
   api: WorkbenchApi;
   initialSection: Section;
   appearance: AppearanceStore;
   expertLibrary?: boolean;
+  openWork?: () => void;
+  nativeRun?: { api: NativeRunApi; spaceId: string };
+  projectExecution?:
+    | {
+        readonly spaceId: string;
+        readonly api: Pick<
+          import('../execution/ExecutionApi.js').ExecutionApi,
+          'files' | 'projectArtifacts' | 'taskProgress'
+        >;
+      }
+    | undefined;
+  legacyMode?: boolean;
+  knowledge?:
+    (Omit<KnowledgePanelProps, 'onDirtyChange'> & { projectApi?: ProjectKnowledgeApi }) | undefined;
 }) {
   const [state, setState] = useState<Workbench>(emptyWorkbench);
   const [model, setModel] = useState('尚未读取');
   const [section, setSection] = useState(initialSection);
+  const [knowledgeDirty, setKnowledgeDirty] = useState(false);
+  const [projectKnowledgeDirty, setProjectKnowledgeDirty] = useState(false);
+  const knowledgeLeave = useLeaveConfirmation(() => knowledge?.lifetime.isCurrent() ?? true);
+  function leaveKnowledge(action: () => void) {
+    knowledgeLeave.request(action, knowledgeDirty || projectKnowledgeDirty);
+  }
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
   const [dialogError, setDialogError] = useState('');
-  const pending = useRef<{ content: string; id: string; revision: number } | null>(null);
+  const pending = useRef<{
+    content: string;
+    id: string;
+    revision: number;
+    intent: WorkbenchWriteIntent | undefined;
+  } | null>(null);
+  const member = api.member;
+  const capabilities = member?.capabilities();
+  const planningReadiness = usePlanningReadiness(api, model);
+  const dialogBaseline = useRef('');
   const [saving, setSaving] = useState(false);
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  useUnsavedChanges(saving || (!!dialog && JSON.stringify(dialog) !== dialogBaseline.current));
+  const [taskAfterProject, setTaskAfterProject] = useState<Extract<
+    Dialog,
+    { kind: 'task' }
+  > | null>(null);
   const [templateBrowserOpen, setTemplateBrowserOpen] = useState(false);
   const [definitionEditorOpen, setDefinitionEditorOpen] = useState(false);
   const templateId = dialog?.kind === 'task' ? dialog.template?.assetId : null;
@@ -95,6 +153,16 @@ export function WorkbenchPage({
     }
   }, [assetContent]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [taskFilters, setTaskFilters] = useTaskFilters(
+    member && projectExecution
+      ? {
+          accountId: member.actorId,
+          spaceId: projectExecution.spaceId,
+        }
+      : undefined,
+  );
+  const taskView = taskFilters.view;
+  const setTaskView = (view: 'list' | 'board') => setTaskFilters({ ...taskFilters, view });
   const [initialPlanning, setInitialPlanning] = useState<InitialPlanning | null>(null);
   const submitting = useRef(false);
   const pageGeneration = useRef(0);
@@ -105,7 +173,15 @@ export function WorkbenchPage({
     [],
   );
   useEffect(() => () => initialPlanning?.controller.abort(), [initialPlanning]);
-  const [projectFilter, setProjectFilter] = useState('');
+  const projectFilter = state.projects.some((project) => project.id === taskFilters.projectId)
+    ? taskFilters.projectId
+    : '';
+  const participantFilter = state.participants.some(
+    (person) => person.id === taskFilters.participantId,
+  )
+    ? taskFilters.participantId
+    : '';
+  const setProjectFilter = (projectId: string) => setTaskFilters({ ...taskFilters, projectId });
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [projectTab, setProjectTab] = useState<ProjectTab>('overview');
   const activeProject =
@@ -126,10 +202,27 @@ export function WorkbenchPage({
     versionId: string;
   } | null>(null);
   function openDialog(next: Dialog) {
+    dialogBaseline.current = JSON.stringify(next);
     setDialog(structuredClone(next));
+    setTaskAfterProject(null);
     setError('');
     setDialogError('');
     pending.current = null;
+  }
+  function createProjectForTask(draft: Extract<Dialog, { kind: 'task' }>) {
+    openDialog({
+      kind: 'project',
+      value: { id: uid(), name: '', description: '', defaultParticipantIds: [] },
+    });
+    setTaskAfterProject(structuredClone(draft));
+  }
+  function closeDialog() {
+    if (dialog?.kind === 'project' && taskAfterProject) {
+      setDialog(taskAfterProject);
+      setTaskAfterProject(null);
+      setDialogError('');
+      pending.current = null;
+    } else setDialog(null);
   }
   function createCatalogItem() {
     if (activeProject) newTask(activeProject.id);
@@ -189,6 +282,21 @@ export function WorkbenchPage({
             ? '新建专家'
             : '新建资产'
           : '创建任务';
+  const canCreate =
+    !member ||
+    (activeProject || section === 'tasks'
+      ? capabilities?.createTask || (!state.projects.length && capabilities?.createProject)
+      : section === 'projects' && capabilities?.createProject);
+  function initialParticipants(project: Project | undefined, current = state) {
+    if (!member && !project) return [];
+    const ids = defaultProjectParticipants(project, current);
+    const self =
+      member &&
+      current.participants.find(
+        (p) => p.id === member.actorId && p.kind === 'human' && p.available,
+      );
+    return self ? [...new Set([self.id, ...ids])] : ids;
+  }
   function originInfo(value: Participant | TeamAsset, kind: 'asset' | 'expert') {
     if (!value.origin) return null;
     return (
@@ -242,15 +350,53 @@ export function WorkbenchPage({
     setSaving(true);
     setDialogError('');
     const content = JSON.stringify(command);
-    if (pending.current?.content !== content)
-      pending.current = { content, id: uid(), revision: state.revision };
+    if (pending.current?.content !== content) {
+      const intent: WorkbenchWriteIntent | undefined =
+        command.type === 'save-project'
+          ? state.projects.some((p) => p.id === command.project.id)
+            ? 'update-project'
+            : 'create-project'
+          : command.type === 'save-task'
+            ? command.task.status === 'ready'
+              ? 'confirm-task'
+              : state.tasks.some((t) => t.id === command.task.id)
+                ? 'update-task'
+                : 'create-task'
+            : command.type === 'instantiate-template'
+              ? 'create-task'
+              : undefined;
+      pending.current = { content, id: uid(), revision: state.revision, intent };
+    }
     try {
-      const committed = await api.save(pending.current.revision, command, pending.current.id);
+      const committed = await api.save(
+        pending.current.revision,
+        command,
+        pending.current.id,
+        pending.current.intent,
+      );
       setState(committed);
       if (command.type === 'save-project') {
-        setActiveProjectId(command.project.id);
-        setSection('projects');
-        setSearch('');
+        if (taskAfterProject) {
+          setDialog({
+            ...taskAfterProject,
+            value: {
+              ...taskAfterProject.value,
+              projectId: command.project.id,
+              participantIds: taskAfterProject.participantIdsEdited
+                ? taskAfterProject.value.participantIds
+                : initialParticipants(command.project, committed),
+            },
+          });
+          setTaskAfterProject(null);
+          setProjectFilter(command.project.id);
+        } else {
+          setActiveProjectId(command.project.id);
+          setSection('projects');
+          setSearch('');
+          setDialog(null);
+        }
+      } else {
+        setDialog(null);
       }
       if (
         expertLibrary &&
@@ -259,7 +405,6 @@ export function WorkbenchPage({
       )
         setExpertView({ search: '', role: '', selectedId: command.participant.id });
       pending.current = null;
-      setDialog(null);
       return committed;
     } catch (e) {
       setDialogError(e instanceof Error ? e.message : '保存失败，请重试。');
@@ -270,6 +415,11 @@ export function WorkbenchPage({
     }
   }
   async function createTask(draft: Extract<Dialog, { kind: 'task' }>) {
+    if (!state.projects.some((project) => project.id === draft.value.projectId)) {
+      if (!state.projects.length) createProjectForTask(draft);
+      else setDialogError('所属项目已不可用，请重新选择或新建项目。');
+      return;
+    }
     const generation = pageGeneration.current;
     const goal = draft.value.goal.trim();
     if (!goal) {
@@ -329,28 +479,30 @@ export function WorkbenchPage({
     } else setSection('tasks');
   }
   function newTask(projectId = projectFilter || state.projects[0]?.id) {
-    if (!projectId) {
-      openDialog({
-        kind: 'project',
-        value: { id: uid(), name: '', description: '', defaultParticipantIds: [] },
-      });
+    if (
+      member &&
+      !capabilities?.createTask &&
+      !(!state.projects.length && capabilities?.createProject)
+    )
       return;
-    }
+    const availableProjectId = state.projects.some((project) => project.id === projectId)
+      ? projectId
+      : undefined;
     openDialog({
       kind: 'task',
-      planning: 'ai',
+      participantIdsEdited: false,
+      planning: member && !capabilities?.planning ? 'manual' : 'ai',
       template: null,
       value: {
         id: uid(),
-        projectId,
+        projectId: availableProjectId ?? '',
         title: '',
         goal: '',
         status: 'draft',
-        participantIds: defaultProjectParticipants(
-          state.projects.find((p) => p.id === projectId),
-          state,
+        participantIds: initialParticipants(
+          state.projects.find((p) => p.id === availableProjectId),
         ),
-        ownerId: null,
+        ownerId: member?.actorId ?? null,
         updatedAt: new Date().toISOString(),
         workflows: [{ id: uid(), name: '主工作流', parentNodeId: null, nodes: [] }],
       },
@@ -360,6 +512,7 @@ export function WorkbenchPage({
     if (dialog?.kind !== 'task') return;
     setDialog({
       ...dialog,
+      participantIdsEdited: true,
       value: {
         ...dialog.value,
         participantIds,
@@ -448,11 +601,47 @@ export function WorkbenchPage({
           ? state.assets
           : state.tasks
     ).some((item) => item.id === dialog.value.id);
-  const tasks = state.tasks
-    .filter(
-      (t) => (!projectFilter || t.projectId === projectFilter) && matches(`${t.title} ${t.goal}`),
-    )
-    .reverse();
+  const taskCandidates = taskFilterCandidates(state.tasks, {
+    ...taskFilters,
+    projectId: projectFilter,
+    participantId: participantFilter,
+  });
+  const progressTasks = activeTask
+    ? [activeTask]
+    : activeProject && ['overview', 'work'].includes(projectTab)
+      ? state.tasks
+          .filter((task) => task.projectId === activeProject.id)
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          .slice(0, projectTab === 'overview' ? 5 : undefined)
+      : section === 'tasks'
+        ? taskCandidates
+        : [];
+  const progressPlans = progressTasks.flatMap((task) => {
+    const plan = latestTaskPlan(state.appliedPlans, task.id);
+    return plan ? [{ taskId: task.id, planId: plan.id, revision: plan.revision }] : [];
+  });
+  const progress = useTaskProgress(
+    projectExecution?.api.taskProgress,
+    projectExecution?.spaceId,
+    progressPlans,
+    state,
+  );
+  function progressFor(taskId: string): TaskProgressState | undefined {
+    if (!state.appliedPlans.some((plan) => plan.taskId === taskId)) return undefined;
+    if (!latestTaskPlan(state.appliedPlans, taskId))
+      return { state: 'error', message: '当前确认计划不唯一，请刷新。' };
+    return progress.get(taskId);
+  }
+  const stageFor = (task: WorkTask) =>
+    taskBoardColumn(
+      task,
+      state.appliedPlans.some((plan) => plan.taskId === task.id),
+      progressFor(task.id),
+    );
+  const tasks = taskCandidates.filter(
+    (task) => !taskFilters.stage || stageFor(task) === taskFilters.stage,
+  );
+  const stageLoading = taskCandidates.some((task) => progressFor(task.id)?.state === 'loading');
   if (loading)
     return (
       <div className="zhuma zm-loading" role="status">
@@ -481,83 +670,158 @@ export function WorkbenchPage({
             setActiveTaskId(null);
           }}
           appearance={appearance}
+          progress={progressFor(activeTask.id)}
+          refreshProgress={progress.refresh}
           backLabel={activeProject ? '项目' : '任务清单'}
           {...(initialPlanning ? { initialPlanning } : {})}
+          {...(openWork ? { openWork } : {})}
+          {...(nativeRun ? { nativeRun } : {})}
         />
       </div>
     );
   return (
     <div className="zhuma">
+      {knowledgeLeave.dialog}
       <div className={`zm-page${activeProject ? ' zm-project-page' : ''}`}>
-        <header className="zm-page-heading">
-          <div className="zm-page-title">
-            {activeProject && (
-              <Button variant="quiet" onClick={() => setActiveProjectId(null)}>
-                ← 全部项目
-              </Button>
-            )}
-            <h1>{expertLibrary ? '专家' : (activeProject?.name ?? labels[section])}</h1>
-            <span>
-              {expertLibrary
-                ? state.participants.filter((p) => p.kind === 'expert').length
-                : activeProject
-                  ? undefined
-                  : total}
-            </span>
-          </div>
-          <div className="zm-actions">
-            <Appearance store={appearance} />
-            <Button variant="quiet" onClick={() => void refresh()}>
-              刷新
-            </Button>
-            {activeProject && (
-              <Button onClick={() => openDialog({ kind: 'project', value: activeProject })}>
-                编辑项目
-              </Button>
-            )}
-            {section === 'assets' && (
-              <Button onClick={() => setImportOpen(true)}>
-                {expertLibrary ? '导入专家' : '导入定义'}
-              </Button>
-            )}
-            <Button variant="primary" onClick={createCatalogItem}>
-              ＋ {createLabel}
-            </Button>
-          </div>
-        </header>
-        {!expertLibrary && (
-          <div className="zm-page-bar">
-            <nav className="zm-tabs" aria-label="工作台导航">
-              {(Object.keys(labels) as Section[]).map((s) => (
-                <button
-                  key={s}
-                  aria-current={s === section ? 'page' : undefined}
-                  onClick={() => {
-                    setSection(s);
-                    setSearch('');
-                    setActiveProjectId(null);
-                  }}
+        {section !== 'knowledge' && (
+          <header className="zm-page-heading">
+            <div className="zm-page-title">
+              {activeProject && (
+                <Button
+                  variant="quiet"
+                  onClick={() => leaveKnowledge(() => setActiveProjectId(null))}
                 >
-                  {labels[s]}
-                  <span>
-                    {s === 'projects'
-                      ? state.projects.length
-                      : s === 'tasks'
-                        ? state.tasks.length
-                        : s === 'members'
-                          ? state.participants.length
-                          : catalog.length}
-                  </span>
-                </button>
-              ))}
+                  <ControlIcon direction="left" /> 全部项目
+                </Button>
+              )}
+              <h1>{expertLibrary ? '专家' : (activeProject?.name ?? labels[section])}</h1>
+              <span>
+                {expertLibrary
+                  ? state.participants.filter((p) => p.kind === 'expert').length
+                  : activeProject
+                    ? undefined
+                    : total}
+              </span>
+            </div>
+            <div className="zm-actions">
+              <Appearance store={appearance} />
+              <Button variant="quiet" onClick={() => void refresh()}>
+                刷新
+              </Button>
+              {activeProject && (!member || capabilities?.createProject) && (
+                <Button onClick={() => openDialog({ kind: 'project', value: activeProject })}>
+                  编辑项目
+                </Button>
+              )}
+              {!member && section === 'assets' && (
+                <Button onClick={() => setImportOpen(true)}>
+                  {expertLibrary ? '导入专家' : '导入定义'}
+                </Button>
+              )}
+              <Button
+                variant="primary"
+                disabled={!!member && (loading || saving || !canCreate)}
+                onClick={() => leaveKnowledge(createCatalogItem)}
+              >
+                ＋ {createLabel}
+              </Button>
+            </div>
+          </header>
+        )}
+        {legacyMode && (
+          <p className="zm-mode-notice">当前保留单人模式；已有资料不会自动迁入团队。</p>
+        )}
+        {!expertLibrary && (
+          <div className={`zm-page-bar${section === 'tasks' ? ' zm-task-page-bar' : ''}`}>
+            <nav className="zm-tabs" aria-label="工作台导航">
+              {(Object.keys(labels) as Section[])
+                .filter((s) =>
+                  s === 'knowledge' ? !!knowledge : !member || s === 'projects' || s === 'tasks',
+                )
+                .map((s) => (
+                  <button
+                    key={s}
+                    aria-current={s === section ? 'page' : undefined}
+                    onClick={() => {
+                      if (s === section && !activeProject) return;
+                      leaveKnowledge(() => {
+                        setSection(s);
+                        setSearch('');
+                        setActiveProjectId(null);
+                      });
+                    }}
+                  >
+                    {labels[s]}
+                    {s !== 'knowledge' && (
+                      <span>
+                        {s === 'projects'
+                          ? state.projects.length
+                          : s === 'tasks'
+                            ? state.tasks.length
+                            : s === 'members'
+                              ? state.participants.length
+                              : catalog.length}
+                      </span>
+                    )}
+                  </button>
+                ))}
             </nav>
             {section === 'tasks' && (
-              <div className="zm-filter">
+              <div className="zm-task-view" role="group" aria-label="任务显示方式">
+                <Button
+                  variant="quiet"
+                  aria-pressed={taskView === 'list'}
+                  onClick={() => setTaskView('list')}
+                >
+                  列表
+                </Button>
+                <Button
+                  variant="quiet"
+                  aria-pressed={taskView === 'board'}
+                  onClick={() => setTaskView('board')}
+                >
+                  看板
+                </Button>
+              </div>
+            )}
+            {section === 'tasks' && (
+              <div className="zm-filter zm-task-filters">
                 <input
                   aria-label="搜索任务"
                   placeholder="搜索任务…"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
+                  maxLength={200}
+                  value={taskFilters.search}
+                  onChange={(e) => setTaskFilters({ ...taskFilters, search: e.target.value })}
+                />
+                <SingleSelect
+                  label="筛选参与者"
+                  value={participantFilter}
+                  popupMinWidth={240}
+                  onValueChange={(participantId) =>
+                    setTaskFilters({ ...taskFilters, participantId })
+                  }
+                  options={[
+                    { value: '', label: '所有参与者' },
+                    ...state.participants.map((person) => ({
+                      value: person.id,
+                      label: `${person.name} · ${person.kind === 'expert' ? 'Agent 专家' : '成员'}`,
+                    })),
+                  ]}
+                />
+                <SingleSelect
+                  label="筛选阶段"
+                  value={taskFilters.stage}
+                  popupMinWidth={200}
+                  onValueChange={(stage) =>
+                    setTaskFilters({ ...taskFilters, stage: stage as typeof taskFilters.stage })
+                  }
+                  options={[
+                    { value: '', label: '所有阶段' },
+                    ...taskBoardColumns.map((column) => ({
+                      value: column.id,
+                      label: `${column.label} · ${taskCandidates.filter((task) => stageFor(task) === column.id).length}`,
+                    })),
+                  ]}
                 />
                 <SingleSelect
                   label="筛选项目"
@@ -568,9 +832,26 @@ export function WorkbenchPage({
                     ...state.projects.map((p) => ({ value: p.id, label: p.name })),
                   ]}
                 />
+                <div className="zm-task-filter-summary" role="status">
+                  <span>
+                    {tasks.length} / {state.tasks.length} 项任务
+                    {stageLoading ? ' · 正在读取阶段…' : ''}
+                  </span>
+                  {(projectFilter ||
+                    participantFilter ||
+                    taskFilters.stage ||
+                    taskFilters.search) && (
+                    <Button
+                      variant="quiet"
+                      onClick={() => setTaskFilters({ ...emptyTaskFilters, view: taskView })}
+                    >
+                      清除筛选
+                    </Button>
+                  )}
+                </div>
               </div>
             )}
-            {section !== 'tasks' && !activeProject && (
+            {section !== 'tasks' && section !== 'knowledge' && !activeProject && (
               <div className="zm-filter">
                 <input
                   type="search"
@@ -606,6 +887,9 @@ export function WorkbenchPage({
               </div>
             )}
           </div>
+        )}
+        {section === 'knowledge' && knowledge && (
+          <KnowledgePanel {...knowledge} onDirtyChange={setKnowledgeDirty} />
         )}
         {!expertLibrary && section === 'assets' && (
           <nav className="zm-asset-categories" aria-label="资产分类">
@@ -664,10 +948,32 @@ export function WorkbenchPage({
             project={activeProject}
             state={state}
             tab={projectTab}
-            changeTab={setProjectTab}
-            openTask={setActiveTaskId}
-            createTask={() => newTask(activeProject.id)}
+            changeTab={(tab) => {
+              if (tab !== projectTab) leaveKnowledge(() => setProjectTab(tab));
+            }}
+            openTask={(id) => leaveKnowledge(() => setActiveTaskId(id))}
+            createTask={() => leaveKnowledge(() => newTask(activeProject.id))}
             edit={() => openDialog({ kind: 'project', value: activeProject })}
+            canCreateTask={!member || capabilities?.createTask === true}
+            canEdit={!member || capabilities?.createProject === true}
+            resourcesConnected={!member || capabilities?.resources === 'authorized'}
+            projectExecution={projectExecution?.api}
+            spaceId={projectExecution?.spaceId}
+            taskProgress={progressFor}
+            {...(knowledge?.projectApi
+              ? {
+                  knowledge: {
+                    scope: {
+                      actorId: knowledge.actorId,
+                      spaceId: knowledge.spaceId,
+                      projectId: activeProject.id,
+                    },
+                    api: knowledge.projectApi,
+                    isCurrent: () => knowledge.lifetime.isCurrent(),
+                    onDirtyChange: setProjectKnowledgeDirty,
+                  },
+                }
+              : {})}
           />
         )}
         {section === 'projects' && !activeProject && !!projects.length && (
@@ -695,13 +1001,19 @@ export function WorkbenchPage({
                   {state.tasks.filter((t) => t.projectId === p.id).length} 项任务
                 </span>
                 <div className="zm-directory-actions">
-                  <Button variant="quiet" onClick={() => openDialog({ kind: 'project', value: p })}>
+                  <Button
+                    variant="quiet"
+                    disabled={!!member && !capabilities?.createProject}
+                    onClick={() => openDialog({ kind: 'project', value: p })}
+                  >
                     编辑
                   </Button>
                   <Button
+                    disabled={!!member && !capabilities?.createTask}
                     onClick={() => {
                       setActiveProjectId(p.id);
                       setProjectTab('work');
+                      setSearch('');
                       newTask(p.id);
                     }}
                   >
@@ -714,70 +1026,94 @@ export function WorkbenchPage({
         )}
         {section === 'tasks' && (
           <>
-            <div className="zm-task-table">
-              <div className="zm-table-heading">
-                <span>工作事项</span>
-                <span>参与者</span>
-                <span>工作流</span>
-                <span>状态</span>
-              </div>
-              {tasks.map((t) => (
-                <button className="zm-task-row" key={t.id} onClick={() => setActiveTaskId(t.id)}>
-                  <span>
-                    <strong>{t.title}</strong>
-                    <small>
-                      {state.projects.find((p) => p.id === t.projectId)?.name}
-                      <span className="zm-meta-dot">·</span>
-                      {state.participants.find((p) => p.id === t.ownerId)?.name ?? '负责人待定'}
-                    </small>
-                  </span>
-                  <span className="zm-avatars">
-                    {state.participants
-                      .filter((p) => t.participantIds.includes(p.id))
-                      .slice(0, 3)
-                      .map((p) => (
-                        <span title={p.name} className={`zm-avatar ${p.kind}`} key={p.id}>
-                          {p.kind === 'expert' ? 'AI' : p.name[0]}
+            {taskView === 'board' ? (
+              <TaskBoard
+                tasks={tasks}
+                projects={state.projects}
+                participants={state.participants}
+                progress={progressFor}
+                confirmed={(id) => state.appliedPlans.some((plan) => plan.taskId === id)}
+                openTask={setActiveTaskId}
+              />
+            ) : (
+              <div className="zm-task-table">
+                <div className="zm-table-heading">
+                  <span>工作事项</span>
+                  <span>参与者</span>
+                  <span>工作流</span>
+                  <span>状态</span>
+                </div>
+                {tasks.map((t) => (
+                  <button className="zm-task-row" key={t.id} onClick={() => setActiveTaskId(t.id)}>
+                    <span>
+                      <strong>{t.title}</strong>
+                      <small>
+                        {state.projects.find((p) => p.id === t.projectId)?.name}
+                        <span className="zm-meta-dot">·</span>
+                        {state.participants.find((p) => p.id === t.ownerId)?.name ?? '负责人待定'}
+                      </small>
+                    </span>
+                    <span className="zm-avatars">
+                      {state.participants
+                        .filter((p) => t.participantIds.includes(p.id))
+                        .slice(0, 3)
+                        .map((p) => {
+                          const avatarLabel = `${p.name} · ${p.kind === 'expert' ? 'Agent 专家' : '团队成员'}（参与者）`;
+                          return (
+                            <span
+                              role="img"
+                              title={avatarLabel}
+                              aria-label={avatarLabel}
+                              className={`zm-avatar ${p.kind}`}
+                              key={p.id}
+                            >
+                              {p.kind === 'expert' ? 'AI' : p.name[0]}
+                            </span>
+                          );
+                        })}
+                      {t.participantIds.length > 3 && (
+                        <span
+                          className="zm-avatar zm-avatar-overflow"
+                          title={`${t.participantIds.length} 位参与者`}
+                        >
+                          +{t.participantIds.length - 3}
                         </span>
-                      ))}
-                    {t.participantIds.length > 3 && (
-                      <span
-                        className="zm-avatar zm-avatar-overflow"
-                        title={`${t.participantIds.length} 位参与者`}
-                      >
-                        +{t.participantIds.length - 3}
+                      )}
+                    </span>
+                    <span>
+                      {t.workflows.flatMap((w) => w.nodes).length} 节点
+                      {t.workflows.length > 1 && <small>{t.workflows.length} 个工作流</small>}
+                    </span>
+                    <span className="zm-task-state-cell">
+                      <TaskProgressSummary
+                        progress={progressFor(t.id)}
+                        confirmed={state.appliedPlans.some((plan) => plan.taskId === t.id)}
+                        compact
+                      />
+                      <span className={`zm-status ${t.status}`}>
+                        {t.status === 'draft' ? '计划草稿' : '计划已确认'}
                       </span>
-                    )}
-                  </span>
-                  <span>
-                    {t.workflows.flatMap((w) => w.nodes).length} 节点
-                    {t.workflows.length > 1 && <small>{t.workflows.length} 个工作流</small>}
-                  </span>
-                  <span className={`zm-status ${t.status}`}>
-                    {t.status === 'draft' ? '计划草稿' : '已确认'}
-                  </span>
-                </button>
-              ))}
-            </div>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
             {!tasks.length && (
               <div className="zm-empty">
-                <h3>{search ? '没有匹配的任务' : '开始下一项工作'}</h3>
+                <h3>
+                  {stageLoading
+                    ? '正在读取任务阶段…'
+                    : state.tasks.length
+                      ? '没有匹配的任务'
+                      : '开始下一项工作'}
+                </h3>
                 <p>
-                  {search
+                  {state.tasks.length
                     ? '换个关键词，或清除筛选查看全部任务。'
                     : '创建任务后，选择参与者，再由 AI 或你自己编排工作流。'}
                 </p>
-                {search ? (
-                  <button
-                    onClick={() => {
-                      setSearch('');
-                      setProjectFilter('');
-                    }}
-                  >
-                    清除筛选
-                  </button>
-                ) : (
-                  <button onClick={() => newTask()} className="primary">
+                {!state.tasks.length && (
+                  <button onClick={() => newTask()} className="primary" disabled={!canCreate}>
                     创建任务
                   </button>
                 )}
@@ -882,35 +1218,39 @@ export function WorkbenchPage({
             ))}
           </div>
         )}
-        {!expertLibrary && !activeProject && section !== 'tasks' && !visibleCount && (
-          <div className="zm-empty zm-directory-empty">
-            <h3>{directoryTotal ? `没有匹配的${labels[section]}` : `暂无${labels[section]}`}</h3>
-            <p>
-              {directoryTotal
-                ? '换个关键词，或清除筛选。'
-                : section === 'projects'
-                  ? '创建项目，集中管理相关工作。'
-                  : section === 'members'
-                    ? '添加团队成员或 Agent 专家，填写职责后参与分工。'
-                    : '新建或导入专家、Skill、MCP 能力定义和工作流模板。'}
-            </p>
-            {directoryTotal ? (
-              <Button
-                onClick={() => {
-                  setSearch('');
-                  setMemberKind('all');
-                  setAssetKind('all');
-                }}
-              >
-                清除筛选
-              </Button>
-            ) : (
-              <Button variant="primary" onClick={createCatalogItem}>
-                {createLabel}
-              </Button>
-            )}
-          </div>
-        )}
+        {!expertLibrary &&
+          !activeProject &&
+          section !== 'tasks' &&
+          section !== 'knowledge' &&
+          !visibleCount && (
+            <div className="zm-empty zm-directory-empty">
+              <h3>{directoryTotal ? `没有匹配的${labels[section]}` : `暂无${labels[section]}`}</h3>
+              <p>
+                {directoryTotal
+                  ? '换个关键词，或清除筛选。'
+                  : section === 'projects'
+                    ? '创建项目，集中管理相关工作。'
+                    : section === 'members'
+                      ? '添加团队成员或 Agent 专家，填写职责后参与分工。'
+                      : '新建或导入专家、Skill、MCP 能力定义和工作流模板。'}
+              </p>
+              {directoryTotal ? (
+                <Button
+                  onClick={() => {
+                    setSearch('');
+                    setMemberKind('all');
+                    setAssetKind('all');
+                  }}
+                >
+                  清除筛选
+                </Button>
+              ) : (
+                <Button variant="primary" onClick={createCatalogItem} disabled={!canCreate}>
+                  {createLabel}
+                </Button>
+              )}
+            </div>
+          )}
       </div>
       {dialog && (
         <Modal
@@ -919,7 +1259,7 @@ export function WorkbenchPage({
               ? '创建任务'
               : `${dialogExists ? '编辑' : '新建'}${dialog.kind === 'project' ? '项目' : dialog.kind === 'member' ? (dialog.value.kind === 'expert' ? '专家' : '成员') : '资产'}`
           }
-          close={() => !saving && setDialog(null)}
+          close={() => !saving && closeDialog()}
         >
           <form
             className={dialog.kind === 'task' ? 'zm-task-form' : 'zm-catalog-form'}
@@ -950,11 +1290,16 @@ export function WorkbenchPage({
             <div className="zm-form-body">
               <fieldset className="zm-form-fields" disabled={saving}>
                 {dialog.kind === 'project' && (
-                  <ProjectFields
-                    project={dialog.value}
-                    state={state}
-                    change={(value) => setDialog({ ...dialog, value })}
-                  />
+                  <>
+                    {taskAfterProject && (
+                      <p className="zm-project-task-context">保存项目后继续创建任务。</p>
+                    )}
+                    <ProjectFields
+                      project={dialog.value}
+                      state={state}
+                      change={(value) => setDialog({ ...dialog, value })}
+                    />
+                  </>
                 )}
                 {dialog.kind === 'member' && (
                   <>
@@ -1227,34 +1572,49 @@ export function WorkbenchPage({
                       />
                     </Field>
                     <div className="zm-creation-context">
-                      <Field label="所属项目">
-                        <SingleSelect
-                          label="所属项目"
-                          value={dialog.value.projectId}
-                          onValueChange={(projectId) =>
-                            setDialog({ ...dialog, value: { ...dialog.value, projectId } })
-                          }
-                          options={state.projects.map((p) => ({ value: p.id, label: p.name }))}
-                        />
-                      </Field>
-                      <div className="zm-creation-participants">
-                        <span>参与者 · {dialog.value.participantIds.length} 位</span>
-                        {state.projects.find((p) => p.id === dialog.value.projectId)
-                          ?.defaultParticipantIds !== undefined && (
-                          <Button
-                            variant="quiet"
-                            onClick={() =>
-                              changeTaskParticipants(
-                                defaultProjectParticipants(
-                                  state.projects.find((p) => p.id === dialog.value.projectId),
-                                  state,
-                                ),
-                              )
+                      <div className="zm-task-project-choice">
+                        <div className="zm-creation-field-heading">
+                          <span>所属项目</span>
+                          {!!state.projects.length && (!member || capabilities?.createProject) && (
+                            <Button variant="quiet" onClick={() => createProjectForTask(dialog)}>
+                              新建项目
+                            </Button>
+                          )}
+                        </div>
+                        {state.projects.length ? (
+                          <SingleSelect
+                            label="所属项目"
+                            value={dialog.value.projectId}
+                            onValueChange={(projectId) =>
+                              setDialog({ ...dialog, value: { ...dialog.value, projectId } })
                             }
-                          >
-                            使用项目默认参与者
-                          </Button>
+                            options={state.projects.map((p) => ({ value: p.id, label: p.name }))}
+                          />
+                        ) : (
+                          <span className="zm-project-needed">尚无项目</span>
                         )}
+                      </div>
+                      <div className="zm-creation-participants">
+                        <div className="zm-creation-field-heading">
+                          <span>参与者 · {dialog.value.participantIds.length} 位</span>
+                          {state.projects.find((p) => p.id === dialog.value.projectId)
+                            ?.defaultParticipantIds !== undefined && (
+                            <Button
+                              variant="quiet"
+                              aria-label="使用项目默认参与者"
+                              onClick={() =>
+                                changeTaskParticipants(
+                                  initialParticipants(
+                                    state.projects.find((p) => p.id === dialog.value.projectId),
+                                    state,
+                                  ),
+                                )
+                              }
+                            >
+                              使用项目默认
+                            </Button>
+                          )}
+                        </div>
                         <ParticipantSelect
                           label="参与者"
                           multiple
@@ -1264,6 +1624,7 @@ export function WorkbenchPage({
                         />
                       </div>
                     </div>
+                    {member && <PlanningReadiness value={planningReadiness} />}
                     <fieldset className="zm-create-modes">
                       <legend>规划方式</legend>
                       <label>
@@ -1271,6 +1632,12 @@ export function WorkbenchPage({
                           type="radio"
                           name="planning-mode"
                           value="ai"
+                          disabled={
+                            !!member &&
+                            (!capabilities?.planning ||
+                              (dialog.value.ownerId !== null &&
+                                dialog.value.ownerId !== member.actorId))
+                          }
                           checked={dialog.planning === 'ai'}
                           onChange={() => setDialog({ ...dialog, planning: 'ai' })}
                         />
@@ -1278,21 +1645,26 @@ export function WorkbenchPage({
                           <strong>AI 规划</strong>
                         </span>
                       </label>
-                      <label>
-                        <input
-                          type="radio"
-                          name="planning-mode"
-                          value="template"
-                          checked={dialog.planning === 'template'}
-                          onChange={() => {
-                            setDialog({ ...dialog, planning: 'template' });
-                            if (!dialog.template) setTemplateBrowserOpen(true);
-                          }}
-                        />
-                        <span>
-                          <strong>使用工作流</strong>
-                        </span>
-                      </label>
+                      {(!member ||
+                        state.assets.some(
+                          (asset) => asset.kind === 'template' && asset.available,
+                        )) && (
+                        <label>
+                          <input
+                            type="radio"
+                            name="planning-mode"
+                            value="template"
+                            checked={dialog.planning === 'template'}
+                            onChange={() => {
+                              setDialog({ ...dialog, planning: 'template' });
+                              if (!dialog.template) setTemplateBrowserOpen(true);
+                            }}
+                          />
+                          <span>
+                            <strong>使用工作流</strong>
+                          </span>
+                        </label>
+                      )}
                       <label>
                         <input
                           type="radio"
@@ -1364,6 +1736,8 @@ export function WorkbenchPage({
                       change={(ids) =>
                         setDialog({
                           ...dialog,
+                          planning:
+                            member && ids[0] !== member.actorId ? 'manual' : dialog.planning,
                           value: { ...dialog.value, ownerId: ids[0] ?? null },
                         })
                       }
@@ -1379,17 +1753,20 @@ export function WorkbenchPage({
               </div>
             )}
             <footer>
-              <Button disabled={saving} onClick={() => setDialog(null)}>
+              <Button disabled={saving} onClick={closeDialog}>
                 取消
               </Button>
               <Button
                 type={
-                  dialog.kind === 'task' && dialog.planning === 'template' && !dialog.template
+                  dialog.kind === 'task' &&
+                  (!dialog.value.projectId || (dialog.planning === 'template' && !dialog.template))
                     ? 'button'
                     : 'submit'
                 }
                 onClick={() => {
-                  if (dialog.kind === 'task' && dialog.planning === 'template' && !dialog.template)
+                  if (dialog.kind !== 'task') return;
+                  if (!dialog.value.projectId) createProjectForTask(dialog);
+                  else if (dialog.planning === 'template' && !dialog.template)
                     setTemplateBrowserOpen(true);
                 }}
                 variant="primary"
@@ -1397,15 +1774,17 @@ export function WorkbenchPage({
                 busyLabel="正在保存…"
               >
                 {dialog.kind === 'task'
-                  ? dialog.planning === 'ai'
-                    ? '生成计划'
-                    : dialog.planning === 'template' && !dialog.template
-                      ? '选择工作流'
-                      : dialog.planning === 'template' &&
-                          (Object.values(dialog.template!.roles).some((v) => !v) ||
-                            Object.values(dialog.template?.resources ?? {}).some((v) => !v))
-                        ? '保存草稿'
-                        : '创建工作流'
+                  ? !dialog.value.projectId
+                    ? '先创建项目'
+                    : dialog.planning === 'ai'
+                      ? '生成计划'
+                      : dialog.planning === 'template' && !dialog.template
+                        ? '选择工作流'
+                        : dialog.planning === 'template' &&
+                            (Object.values(dialog.template!.roles).some((v) => !v) ||
+                              Object.values(dialog.template?.resources ?? {}).some((v) => !v))
+                          ? '保存草稿'
+                          : '创建工作流'
                   : '保存'}
               </Button>
             </footer>

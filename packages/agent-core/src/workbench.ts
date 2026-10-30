@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { validatePlan } from './plan.js';
 import {
+  MemberAssetRegistrySchema,
+  MemberAssetReferenceSchema,
+  MemberAssetFileReferencesSchema,
+  memberAssetDefinitionId,
+} from './member-asset-contract.js';
+import {
   ResourceOriginSchema,
   ImportPackageInputSchema,
   previewResourcePackage,
@@ -28,12 +34,20 @@ export const ParticipantSchema = z
     instructions: z.string().max(32000),
     available: z.boolean(),
     origin: ResourceOriginSchema.optional(),
+    memberAsset: MemberAssetReferenceSchema.optional(),
     resourceBindings: z.strictObject({ skillIds: ids, mcpIds: ids }).optional(),
   })
   .refine(
     (p) =>
-      p.kind === 'expert' || (!p.origin && !p.resourceBindings && p.instructions.length <= 8000),
+      p.kind === 'expert' ||
+      (!p.origin && !p.memberAsset && !p.resourceBindings && p.instructions.length <= 8000),
     '真人成员不能携带专家来源／能力，说明最多 8000 字符。',
+  )
+  .refine(
+    (p) =>
+      !p.memberAsset ||
+      (p.memberAsset.kind === 'expert' && p.id === memberAssetDefinitionId(p.memberAsset)),
+    '已发布专家必须保留完整固定引用与对应定义标识。',
   )
   .refine(
     (p) => !p.available || !p.origin?.missing.length,
@@ -48,7 +62,26 @@ export const AssetSchema = z
     content: z.string().max(150000),
     available: z.boolean(),
     origin: ResourceOriginSchema.optional(),
+    memberAsset: MemberAssetReferenceSchema.optional(),
+    memberTemplate: z
+      .strictObject({
+        schemaVersion: z.literal(1),
+        spaceId: id,
+        ownerId: id,
+        sourceTaskId: id,
+        sourceWorkbenchRevision: z.number().int().nonnegative(),
+      })
+      .optional(),
   })
+  .refine(
+    (a) =>
+      !a.memberAsset ||
+      (a.memberAsset.kind === a.kind &&
+        a.id === memberAssetDefinitionId(a.memberAsset) &&
+        !a.memberTemplate),
+    '已发布资产必须保留完整固定引用与对应定义标识。',
+  )
+  .refine((a) => !a.memberTemplate || a.kind === 'template', '成员工作流归属仅适用于工作流资产。')
   .refine((a) => a.kind === 'template' || a.content.length <= (a.kind === 'skill' ? 60000 : 8000), {
     path: ['content'],
     message: 'Skill 正文最多 60000 字符，MCP 正文最多 8000 字符。',
@@ -82,6 +115,7 @@ export const ProjectSchema = z.strictObject({
   // Optional fields preserve old snapshots and command fingerprints without a migration.
   defaultParticipantIds: ids.optional(),
   assetIds: ids.optional(),
+  fileRefs: MemberAssetFileReferencesSchema.optional(),
   references: z
     .array(z.strictObject({ id, name: title, url: projectLink }))
     .max(30)
@@ -139,6 +173,7 @@ export const WorkflowTemplateSchema = z.strictObject({
 export type WorkflowTemplate = z.infer<typeof WorkflowTemplateSchema>;
 export const TemplateSourceSchema = z.strictObject({
   assetId: id,
+  memberAsset: MemberAssetReferenceSchema.optional(),
   sourceWorkbenchRevision: z.number().int().nonnegative(),
   definition: WorkflowTemplateSchema,
   pendingParticipants: z
@@ -160,6 +195,7 @@ export const WorkTaskSchema = z.strictObject({
   status: z.enum(['draft', 'ready']),
   updatedAt: z.string().datetime(),
   templateSource: TemplateSourceSchema.optional(),
+  fileRefs: MemberAssetFileReferencesSchema.optional(),
 });
 export const AppliedPlanSchema = z.strictObject({
   id,
@@ -177,6 +213,8 @@ export const WorkbenchSchema = z.strictObject({
   projects: z.array(ProjectSchema).max(100),
   participants: z.array(ParticipantSchema).max(100),
   assets: z.array(AssetSchema).max(100),
+  // One original Workbench fact owner; absence keeps existing snapshots byte-compatible.
+  memberAssets: MemberAssetRegistrySchema.optional(),
   tasks: z.array(WorkTaskSchema).max(300),
   appliedPlans: z.array(AppliedPlanSchema).max(1000).default([]),
   receipts: z
@@ -240,6 +278,23 @@ export class WorkbenchError extends Error {
 }
 
 /** Definitions are validated here; runtime and review decisions remain execution-owned. */
+function assignedExperts(task: WorkTask, state: Workbench): Participant[] {
+  const assigned = new Set(
+    task.workflows.flatMap((workflow) =>
+      workflow.nodes.flatMap((node) => [
+        ...(node.assigneeId ? [node.assigneeId] : []),
+        ...node.reviewerIds,
+      ]),
+    ),
+  );
+  return state.participants.filter(
+    (participant) =>
+      participant.kind === 'expert' &&
+      task.participantIds.includes(participant.id) &&
+      assigned.has(participant.id),
+  );
+}
+
 export function validateWorkTask(
   task: WorkTask,
   state: Workbench,
@@ -344,6 +399,25 @@ export function validateWorkTask(
           if (!asset || (task.status === 'ready' && !asset.available))
             errors.push(`「${node.title}」引用的 ${kind} 不存在或不可用。`);
         }
+      }
+    }
+  }
+  if (task.status === 'ready') {
+    for (const expert of assignedExperts(task, state)) {
+      for (const [refs, kind] of [
+        [expert.resourceBindings?.skillIds ?? [], 'skill'],
+        [expert.resourceBindings?.mcpIds ?? [], 'mcp'],
+      ] as const) {
+        if (
+          new Set(refs).size !== refs.length ||
+          refs.some(
+            (id) =>
+              !state.assets.some(
+                (asset) => asset.id === id && asset.kind === kind && asset.available,
+              ),
+          )
+        )
+          errors.push(`专家「${expert.name}」绑定的 ${kind} 不存在、不可用或重复，请重新选择。`);
       }
     }
   }
@@ -572,6 +646,7 @@ export function instantiateWorkflowTemplate(state: Workbench, input: TemplateInp
     })),
     templateSource: {
       assetId: source.id,
+      ...(source.memberAsset ? { memberAsset: source.memberAsset } : {}),
       sourceWorkbenchRevision: state.revision,
       definition,
       pendingParticipants,
@@ -868,12 +943,21 @@ export function applyWorkbenchCommand(state: Workbench, command: WorkbenchComman
 }
 
 function definitionSnapshot(task: WorkTask, state: Workbench) {
+  // Executor and reviewer methods keep their own dependencies. Freezing their
+  // definitions does not grant those tools to the author's node or fill old plans.
+  const assetIds = new Set([
+    ...task.workflows.flatMap((workflow) =>
+      workflow.nodes.flatMap((node) => [...node.skillIds, ...node.mcpIds]),
+    ),
+    ...assignedExperts(task, state).flatMap((expert) => [
+      ...(expert.resourceBindings?.skillIds ?? []),
+      ...(expert.resourceBindings?.mcpIds ?? []),
+    ]),
+  ]);
   return structuredClone({
     task,
     participants: state.participants.filter((p) => task.participantIds.includes(p.id)),
-    assets: state.assets.filter((a) =>
-      task.workflows.some((w) => w.nodes.some((n) => [...n.skillIds, ...n.mcpIds].includes(a.id))),
-    ),
+    assets: state.assets.filter((asset) => assetIds.has(asset.id)),
   });
 }
 

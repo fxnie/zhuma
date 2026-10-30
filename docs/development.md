@@ -1,5 +1,18 @@
 # 开发指南
 
+## 交付入口
+
+[交付规则与总索引 #25](https://github.com/dolibali/zhuma/issues/25) 是统一入口；实时阶段、优先级和依赖读取对应 Issue 标签／正文，由协调者维护。Project 只作用户总览，开发者无需 Projects 写权限。范围与退出条件保留在[覆盖账本](product-coverage.md)，接口与分期见 [roadmap](roadmap.md)，不另建状态副本。
+
+A/B 全程用 GitHub 插件或 `gh` 处理 Issue 与 PR，不打开或自动化操作浏览器。开始、交付、阻塞／依赖变化、验收时，在原工作项更新一次：分支与完整 SHA、PR、实际完成、证据与未覆盖边界、阻塞负责人、下一交付。无变化不重复确认，评审细节留在 PR；用 `Refs #工作项` 关联，未满足退出条件不自动关闭。
+
+A 的 Host 身份装配见 [#28](https://github.com/dolibali/zhuma/issues/28)，登录／空间 UI 见 [#31](https://github.com/dolibali/zhuma/issues/31)，执行业务和显式开始的共享装配见 [#32](https://github.com/dolibali/zhuma/issues/32)。B 的可信身份、项目空间事实和人工链分别见 [#27](https://github.com/dolibali/zhuma/issues/27)、[#29](https://github.com/dolibali/zhuma/issues/29)、[#30](https://github.com/dolibali/zhuma/issues/30)。A 消费真实接口并单写共享入口，不创建第二份授权事实或执行业务。
+
+退回修改的 Client 查询、版本对照、输入生命周期和显式重提边界见[接口说明](contracts/client-revision.md)。
+上游来源的公开投影、正常提交／修改入口和服务阻塞消费见[上游输入说明](contracts/client-upstream-inputs.md)。
+文字／链接草稿的明确保存、冲突恢复、跨轮版本与文件引用边界见[草稿说明](contracts/client-delivery-drafts.md)。
+具体工作项分组、正常处理入口及已审来源投影边界见[待办说明](contracts/client-inbox-groups.md)。
+
 ## 第一次准备
 
 安装 `.node-version` 中的 Node 和 `package.json` 中的 pnpm。仓库提供版本声明，不自动修改开发者全局工具。
@@ -24,10 +37,12 @@ pnpm upstream:check
 | `pnpm check:repo`                   | 检查目录、包名、版本和源码依赖方向                  |
 | `pnpm format` / `pnpm format:check` | 处理自有文件，排除上游和生成目录                    |
 | `pnpm check`                        | 仓库边界、格式、类型和单元测试                      |
+| `pnpm workspace:demo`               | 构建后启动 Agent 处理演示，地址打印在标准输出       |
+| `pnpm test:browser`                 | 构建后用本机 Chrome 跑模拟执行器的浏览器流程        |
 | `pnpm upstream:check`               | 核对子模块 URL、gitlink、HEAD、包版本及上游干净状态 |
 | `pnpm clean`                        | 只删除四个自研包的 dist                             |
 
-测试验证的是初始契约和纯逻辑。当前没有真实 DSH 插件、桌面 E2E、模型调用或 CLI 联动测试，不将这些项目计为通过。
+`pnpm test` 验证契约和内存事务，不调用模型。`pnpm test:browser` 用浏览器操作显式选择的模拟执行器，不计入 `pnpm check`。真实 DSH 插件、桌面安装、模型调用和 CLI 联动仍未验证，不把这些项目计为通过。`pnpm check` 覆盖仓库、类型和 Node 契约测试，不等于业务验收。已有工作台、项目与资产等切片的正式 Host／隔离桌面记录分别保存在[验证记录](workbench-validation.md)和 `docs/review/`；这些历史证据只认证注明的提交和环境。契约、响应重放、作者报告、独立验证、真实 Host／多账号／模型、原生桌面与安装包分列，没有执行的层次不计通过。额外验证由对应工作项约定，不因文档维护重跑旧 UI。
 
 ## DSH 的工具链
 
@@ -39,6 +54,6 @@ pnpm upstream:check
 
 通过专门分支选择标签和精确提交；同步子模块 gitlink 与 `runtime.lock.json`，检查其工具链和接口变化，运行最小插件、状态、桌面及打包回归后再合并。不使用自动跟踪远程分支或启动时安装 latest。
 
-## 首次提交后的下一步
+## 后续开发
 
-先接通一个真实 Host 工具和 Client 页面，证明自研 Bundle 能在锁定的官方桌面中加载。再验证任务执行、取消和重开历史，最后完成品牌、签名和安装包。见 [roadmap](roadmap.md)。
+从 #25 依赖关系拉取一个主要交付切片，在已集成基线上准备；未合入实现写作“已发布待审”，不能据此声称正式集成，也不能忽略已经交付的模块。后续仍需逐项完成真实成员入口、人工／Agent 处理、固定产物、评审、恢复与安装验收，具体退出条件见[覆盖账本](product-coverage.md)。

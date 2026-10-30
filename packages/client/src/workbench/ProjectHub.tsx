@@ -2,6 +2,13 @@ import { useState } from 'react';
 import type { Project, Workbench, WorkTask } from '@zhuma/agent-core';
 import { Button } from './Button.js';
 import { Field, MultiSelect, ParticipantSelect } from './controls.js';
+import { ControlIcon } from './ControlIcon.js';
+import { ProjectArtifactsPanel } from './ProjectArtifactsPanel.js';
+import type { ExecutionApi } from '../execution/ExecutionApi.js';
+import { TaskProgressSummary } from '../execution/TaskProgressSummary.js';
+import type { TaskProgressState } from '../execution/useTaskProgress.js';
+import { ProjectKnowledgePanel } from '../knowledge/ProjectKnowledgePanel.js';
+import type { ProjectKnowledgePanelProps } from '../knowledge/project-knowledge-api.js';
 
 export type ProjectTab = 'overview' | 'work' | 'materials' | 'people';
 const tabs: Record<ProjectTab, string> = {
@@ -150,6 +157,13 @@ export function ProjectHub({
   openTask,
   createTask,
   edit,
+  canCreateTask = true,
+  canEdit = true,
+  resourcesConnected = true,
+  projectExecution,
+  spaceId,
+  taskProgress,
+  knowledge,
 }: {
   project: Project;
   state: Workbench;
@@ -158,6 +172,13 @@ export function ProjectHub({
   openTask(id: string): void;
   createTask(): void;
   edit(): void;
+  canCreateTask?: boolean;
+  canEdit?: boolean;
+  resourcesConnected?: boolean;
+  projectExecution?: Pick<ExecutionApi, 'files' | 'projectArtifacts'> | undefined;
+  spaceId?: string | undefined;
+  taskProgress?: ((taskId: string) => TaskProgressState | undefined) | undefined;
+  knowledge?: ProjectKnowledgePanelProps | undefined;
 }) {
   const [search, setSearch] = useState('');
   const tasks = state.tasks
@@ -185,10 +206,17 @@ export function ProjectHub({
                 {task.workflows.flatMap((w) => w.nodes).length} 个节点
               </small>
             </span>
-            <span className={`zm-badge ${task.status}`}>
-              {task.status === 'ready' ? '计划已确认' : '计划草稿'}
+            <span className="zm-task-state-cell">
+              <TaskProgressSummary
+                progress={taskProgress?.(task.id)}
+                confirmed={state.appliedPlans.some((plan) => plan.taskId === task.id)}
+                compact
+              />
+              <span className={`zm-badge ${task.status}`}>
+                {task.status === 'ready' ? '计划已确认' : '计划草稿'}
+              </span>
             </span>
-            <span aria-hidden>›</span>
+            <ControlIcon direction="right" />
           </button>
         ))}
       </div>
@@ -199,21 +227,29 @@ export function ProjectHub({
       <ul className="zm-project-people">
         {state.participants
           .filter((p) => ids.includes(p.id))
-          .map((p) => (
-            <li key={p.id}>
-              <span className={`zm-avatar ${p.kind}`}>
-                {p.kind === 'expert' ? 'AI' : p.name.slice(0, 1)}
-              </span>
-              <span>
-                <strong>{p.name}</strong>
-                <small>
-                  {p.kind === 'expert' ? 'Agent 专家' : '团队成员'}
-                  {p.role ? ` · ${p.role}` : ''}
-                </small>
-              </span>
-              {!p.available && <small>已停用</small>}
-            </li>
-          ))}
+          .map((p) => {
+            const avatarLabel = `${p.name} · ${p.kind === 'expert' ? 'Agent 专家' : '团队成员'}（参与者）`;
+            return (
+              <li key={p.id}>
+                <span
+                  className={`zm-avatar ${p.kind}`}
+                  role="img"
+                  title={avatarLabel}
+                  aria-label={avatarLabel}
+                >
+                  {p.kind === 'expert' ? 'AI' : p.name.slice(0, 1)}
+                </span>
+                <span>
+                  <strong>{p.name}</strong>
+                  <small>
+                    {p.kind === 'expert' ? 'Agent 专家' : '团队成员'}
+                    {p.role ? ` · ${p.role}` : ''}
+                  </small>
+                </span>
+                {!p.available && <small>已停用</small>}
+              </li>
+            );
+          })}
       </ul>
     );
   }
@@ -249,7 +285,9 @@ export function ProjectHub({
               ) : (
                 <div className="zm-project-empty">
                   <p>从项目目标开始一项工作。</p>
-                  <Button onClick={createTask}>创建任务</Button>
+                  <Button disabled={!canCreateTask} onClick={createTask}>
+                    创建任务
+                  </Button>
                 </div>
               )}
             </section>
@@ -319,7 +357,10 @@ export function ProjectHub({
           ) : (
             <div className="zm-project-empty">
               <p>{tasks.length ? '没有匹配的工作。' : '项目中还没有任务。'}</p>
-              <Button onClick={() => (tasks.length ? setSearch('') : createTask())}>
+              <Button
+                disabled={!tasks.length && !canCreateTask}
+                onClick={() => (tasks.length ? setSearch('') : createTask())}
+              >
                 {tasks.length ? '清除搜索' : '创建任务'}
               </Button>
             </div>
@@ -328,14 +369,45 @@ export function ProjectHub({
       )}
       {tab === 'materials' && (
         <div className="zm-project-materials">
-          <section className="zm-project-panel">
-            <header>
-              <h2>
-                参考链接 <small>{references.length}</small>
-              </h2>
-              <Button onClick={edit}>管理资料</Button>
-            </header>
-            {references.length ? (
+          {knowledge && <ProjectKnowledgePanel {...knowledge} />}
+          {projectExecution?.projectArtifacts && spaceId ? (
+            <ProjectArtifactsPanel
+              spaceId={spaceId}
+              projectId={project.id}
+              api={projectExecution.projectArtifacts}
+              filesApi={projectExecution}
+              openTask={openTask}
+            />
+          ) : (
+            <section className="zm-project-panel">
+              <header>
+                <h2>已接受成果</h2>
+              </header>
+              <p className="zm-project-muted">成果查询尚未接通。</p>
+            </section>
+          )}
+          {!references.length && !assets.length && (
+            <section className="zm-project-panel">
+              <header>
+                <h2>
+                  参考链接与资产 <small>{resourcesConnected ? '未添加' : '团队资产尚未接入'}</small>
+                </h2>
+                <Button disabled={!canEdit} onClick={edit}>
+                  管理资料
+                </Button>
+              </header>
+            </section>
+          )}
+          {!!references.length && (
+            <section className="zm-project-panel">
+              <header>
+                <h2>
+                  参考链接 <small>{references.length}</small>
+                </h2>
+                <Button disabled={!canEdit} onClick={edit}>
+                  管理资料
+                </Button>
+              </header>
               <ul className="zm-project-links">
                 {references.map((r) => (
                   <li key={r.id}>
@@ -346,18 +418,21 @@ export function ProjectHub({
                   </li>
                 ))}
               </ul>
-            ) : (
-              <p className="zm-project-muted">尚未关联参考链接。</p>
-            )}
-            <p className="zm-project-muted">AI 规划可读取链接名称和地址，不会自动抓取正文。</p>
-          </section>
-          <section className="zm-project-panel">
-            <header>
-              <h2>
-                关联资产 <small>{assets.length}</small>
-              </h2>
-            </header>
-            {assets.length ? (
+              <p className="zm-project-muted">AI 规划可读取链接名称和地址，不会自动抓取正文。</p>
+            </section>
+          )}
+          {!!assets.length && (
+            <section className="zm-project-panel">
+              <header>
+                <h2>
+                  关联资产 <small>{assets.length}</small>
+                </h2>
+                {!references.length && (
+                  <Button disabled={!canEdit} onClick={edit}>
+                    管理资料
+                  </Button>
+                )}
+              </header>
               <ul className="zm-project-assets">
                 {assets.map((a) => (
                   <li key={a.id}>
@@ -372,16 +447,17 @@ export function ProjectHub({
                   </li>
                 ))}
               </ul>
-            ) : (
-              <p className="zm-project-muted">可在“管理资料”中关联已有 Skill、MCP 或工作流。</p>
-            )}
-          </section>
-          <section className="zm-project-panel">
-            <header>
-              <h2>已接受成果</h2>
-            </header>
-            <p className="zm-project-muted">成果查询尚未接通。</p>
-          </section>
+            </section>
+          )}
+          {!!references.length && !assets.length && !resourcesConnected && (
+            <section className="zm-project-panel">
+              <header>
+                <h2>
+                  关联资产 <small>团队资产尚未接入</small>
+                </h2>
+              </header>
+            </section>
+          )}
         </div>
       )}
       {tab === 'people' && (
@@ -391,7 +467,9 @@ export function ProjectHub({
               <h2>
                 默认参与者 <small>{people.length}</small>
               </h2>
-              <Button onClick={edit}>更改默认参与者</Button>
+              <Button disabled={!canEdit} onClick={edit}>
+                更改默认参与者
+              </Button>
             </header>
             <p className="zm-project-muted">
               新任务默认加入，可在创建时调整；不改变已有任务和访问权限。

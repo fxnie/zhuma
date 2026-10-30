@@ -1,8 +1,8 @@
 {
   "name": "@zhuma/context",
-  "version": "0.0.0",
+  "version": "1.2.0",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": {

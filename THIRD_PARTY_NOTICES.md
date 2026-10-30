@@ -4,12 +4,21 @@
 
 - 官方仓库：<https://github.com/deepseek-ai/deepseek-harness>
 - 位置：`upstream/deepseek-harness/`（Git 子模块）
-- 基线：`dsh-v0.2.1-rc.2`
-- 提交：`687f282e8625c6b8d11ff58211a90524be2e4317`
+- 基线：`dsh-v0.2.1-rc.4`
+- 提交：`504a01a9578abc2c6f1fb896b1dc322c9fe24f66`
 - 上游许可：保留 [LICENSE](upstream/deepseek-harness/LICENSE) 及其第三方声明。
 - 本次未复制、改写或重新署名上游实现；仅锁定子模块提交。
 
 DSH 的 MIT 许可与本仓自有代码许可分别处理。其依赖、图标、品牌和其他内容应按各自声明处理。
+
+## DSH ACP Adapter
+
+- 社区仓库：<https://github.com/zaimokuza-yoshiteru/dsh-acp-adapter>
+- 发布包：`@zaimokuza/dsh-acp-adapter@0.2.1-rc.4.1`
+- 源码提交：`28ccc6745ec82139c684c3642637e93e00d800f2`
+- 许可：MIT；保留包内 `LICENSE`、原作者版权与实际依赖许可。
+- 通过官方 SDK 临时构建树的独立锁文件固定包完整性，记录于 `runtime.lock.json`；本仓不将它加入根 Workspace。它作为附加执行器注册，不替换默认原生 Agent。
+- 实际使用范围与修改边界见 [来源登记](third_party/acp-adapter.md)。
 
 ## 其他参考与依赖
 
