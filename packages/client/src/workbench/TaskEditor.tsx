@@ -23,7 +23,7 @@ import { NodeInspector } from './NodeInspector.js';
 import { TreeNavigator } from './TreeNavigator.js';
 import { indexWorkTree, resolveWorkLocation, workflowPath } from './navigation.js';
 import { Button } from './Button.js';
-import { Appearance, type AppearanceStore } from './Appearance.js';
+import type { AppearanceStore } from './Appearance.js';
 import { TemplateSaveDialog } from './TemplateSaveDialog.js';
 import { TemplateBindings, type TemplateBindingValues } from './TemplateBindings.js';
 import { SingleSelect } from './SingleSelect.js';
@@ -36,9 +36,16 @@ import { NativeRunLauncher } from '../run/NativeRunWorkspace.js';
 import type { NativeRunApi } from '../run/api.js';
 import { WorkflowControls } from '../workflow/WorkflowControls.js';
 import type { WorkflowView } from '../workflow/api.js';
+import type { ExecutionApi } from '../execution/ExecutionApi.js';
+import { useExecutionCommand } from '../execution/interaction.js';
+import { confirmedNodeTitles, progressNodeMarks } from '../execution/progress-focus.js';
 import { latestTaskPlan, type TaskProgressState } from '../execution/useTaskProgress.js';
 import { TaskProgressSummary } from '../execution/TaskProgressSummary.js';
+import { confirmedPlanAction } from './confirmed-plan-action.js';
+import { taskHeading } from './task-heading.js';
 import { expertResources, prepareExpertProposal } from './expert-resources.js';
+import { MemberAssetFilePicker } from '../assets/MemberAssetFilePicker.js';
+import type { MemberAssetApi } from '../assets/api.js';
 
 // Started only by the create-form submit handler. The parent owns cancellation on task exit.
 export type InitialPlanning = {
@@ -71,13 +78,14 @@ export function TaskEditor({
   model,
   saved,
   close,
-  appearance,
   initialPlanning,
   backLabel = '任务清单',
   openWork,
+  startPlan,
   nativeRun,
   progress,
   refreshProgress,
+  memberAssets,
 }: {
   original: WorkTask;
   state: Workbench;
@@ -85,13 +93,17 @@ export function TaskEditor({
   model: string;
   saved(state: Workbench): void;
   close(): void;
-  appearance: AppearanceStore;
+  /** Accepted for existing embedders; theme preferences are managed in Settings. */
+  appearance?: AppearanceStore;
   initialPlanning?: InitialPlanning;
   backLabel?: string;
   openWork?: () => void;
+  /** Explicit start for this confirmed plan. Absent callers keep the view-only action. */
+  startPlan?: ExecutionApi['startPlan'];
   nativeRun?: { api: NativeRunApi; spaceId: string };
   progress?: TaskProgressState | undefined;
   refreshProgress?: (() => void) | undefined;
+  memberAssets?: { api: MemberAssetApi; spaceId: string };
 }) {
   const [task, setTask] = useState(() => structuredClone(original));
   const planningReadiness = usePlanningReadiness(api, model);
@@ -171,6 +183,14 @@ export function TaskEditor({
   } | null>(null);
   const dirty = JSON.stringify(task) !== baseline;
   const applied = latestTaskPlan(state.appliedPlans, task.id);
+  const planToken = applied ? `${task.id}:${applied.id}:${applied.revision}` : '';
+  const [startedToken, setStartedToken] = useState('');
+  const startCommand = useExecutionCommand();
+  const offerStart =
+    confirmedPlanAction(
+      progress,
+      !!startPlan && !!openWork && !!applied && !dirty && startedToken !== planToken,
+    ) === 'start';
   const workflowFacts = useRef('');
   function updateWorkflowView(next: WorkflowView) {
     setWorkflowView(next);
@@ -703,7 +723,6 @@ export function TaskEditor({
             保存为工作流
           </Button>
         )}
-        <Appearance store={appearance} />
         {conflict && (
           <Button disabled={busy || planning} onClick={() => void readLatest()}>
             读取最新版本
@@ -714,10 +733,37 @@ export function TaskEditor({
         </span>
         {task.status === 'ready' ? (
           api.member ? (
-            openWork && (
-              <Button variant="primary" onClick={openWork}>
-                查看待办
+            offerStart && applied && startPlan && openWork ? (
+              <Button
+                variant="primary"
+                disabled={busy || planning}
+                busy={startCommand.pending}
+                busyLabel="正在派发…"
+                onClick={() => {
+                  const payload = {
+                    taskId: task.id,
+                    planId: applied.id,
+                    revision: applied.revision,
+                  };
+                  void startCommand.run(
+                    payload,
+                    (idempotencyKey, signal) => startPlan({ ...payload, idempotencyKey }, signal),
+                    () => {
+                      setStartedToken(planToken);
+                      refreshProgress?.();
+                      openWork();
+                    },
+                  );
+                }}
+              >
+                开始执行
               </Button>
+            ) : (
+              openWork && (
+                <Button variant="primary" onClick={openWork}>
+                  查看待办
+                </Button>
+              )
             )
           ) : (
             <button
@@ -751,7 +797,7 @@ export function TaskEditor({
       </div>
       <div className="zm-editor-heading">
         {task.status === 'ready' ? (
-          <h1>{task.title}</h1>
+          <h1 title={task.title}>{taskHeading(task)}</h1>
         ) : (
           <input
             className="zm-title-input"
@@ -768,7 +814,11 @@ export function TaskEditor({
               ? `计划已确认${applied ? ` v${applied.revision}` : ''}${api.member ? '' : ' · 待执行接入'}`
               : '计划草稿'}
           </span>
-          <TaskProgressSummary progress={progress} confirmed={!!applied} />
+          <TaskProgressSummary
+            progress={progress}
+            confirmed={!!applied}
+            nodeTitles={confirmedNodeTitles(state.appliedPlans, progress)}
+          />
           {applied && refreshProgress && (
             <Button variant="quiet" onClick={refreshProgress}>
               刷新进度
@@ -829,6 +879,14 @@ export function TaskEditor({
             />
           )}
         </details>
+        {memberAssets && (
+          <MemberAssetFilePicker
+            {...memberAssets}
+            value={task.fileRefs}
+            disabled={locked}
+            change={(fileRefs) => edit({ ...task, fileRefs })}
+          />
+        )}
       </div>
       {nativeRun?.api.workflow &&
         api.member &&
@@ -877,10 +935,16 @@ export function TaskEditor({
           </Button>
         </div>
       )}
-      {error && (
+      {(startCommand.error || error) && (
         <div role="alert" className="zm-error">
-          {error}
-          <button onClick={() => setError('')} aria-label="关闭错误">
+          {startCommand.error || error}
+          <button
+            onClick={() => {
+              if (startCommand.error) startCommand.setError('');
+              else setError('');
+            }}
+            aria-label="关闭错误"
+          >
             ×
           </button>
         </div>
@@ -1060,6 +1124,7 @@ export function TaskEditor({
               workTree={workTree}
               expanded={expanded}
               locateRequest={locateRequest}
+              marks={progressNodeMarks(progress)}
             />
           ) : workflow.nodes.length ? (
             <div className="zm-node-list">
