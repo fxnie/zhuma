@@ -13,14 +13,17 @@ import { MemberSessionBoundary } from '../identity/MemberSessionBoundary.js';
 import { MemberSpaceBoundary, type MemberSpaceLifetime } from '../identity/MemberSpaceBoundary.js';
 import type { MemberShell, SpaceSwitch } from '../identity/shell.js';
 import { createExecutionHttpApi } from './http.js';
+import { EfficiencyExportControls } from './EfficiencyExport.js';
 import { StartablePlansPanel } from './StartablePlansPanel.js';
 import { ExecutionWorkspace } from './ExecutionWorkspace.js';
 import type { AppearanceStore } from '../workbench/Appearance.js';
 import { WorkbenchPage } from '../workbench/WorkbenchPage.js';
 import { createMemberWorkbenchApi } from '../workbench/member-api.js';
 import { createMemberWorkbenchAdapter } from '../workbench/member-adapter.js';
+import { createMemberAssetApi } from '../assets/api.js';
 import { useLeaveConfirmation } from '../workbench/useLeaveConfirmation.js';
 import { createNativeRunApi } from '../run/api.js';
+import { createCodeArtsSetupApi } from '../run/codearts-setup.js';
 import type { RegisterWorkspaceDirectory } from '../run/workspace-approvals.js';
 import type { LocalWorkspaceDirectory } from '../run/workspace-directory.js';
 import { createKnowledgeApi } from '../knowledge/api.js';
@@ -119,6 +122,21 @@ function MemberWork({
     [fetcher, accountId, spaceId, view],
   );
   const [refreshKey, setRefreshKey] = useState(0);
+  const memberAssets = useMemo(
+    () =>
+      createMemberAssetApi(
+        {
+          actorId: accountId,
+          spaceId,
+          isCurrent: () =>
+            alive.current && currentLifetime.current.isCurrent() && view === 'catalog',
+          onUnauthenticated: () => currentLifetime.current.onUnauthenticated(),
+          onUnavailable: () => currentSpaceUnavailable.current(),
+        },
+        fetcher,
+      ),
+    [fetcher, accountId, spaceId, view],
+  );
   const projectExecution = useMemo(
     () =>
       createExecutionHttpApi(
@@ -153,6 +171,12 @@ function MemberWork({
       openModelSettings,
       localDirectory,
       !!memberNative,
+      localDirectory
+        ? createCodeArtsSetupApi(
+            globalThis.fetch,
+            () => alive.current && currentLifetime.current.isCurrent(),
+          )
+        : undefined,
     );
     if (!memberNative) return api;
     const { workspaceApprovals: _approvals, ...localNativeApi } = api;
@@ -193,6 +217,7 @@ function MemberWork({
     };
   }, [fetcher, accountId, spaceId, view]);
   const started = useCallback(() => setRefreshKey((value) => value + 1), []);
+  const viewScope = useMemo(() => ({ accountId, spaceId }), [accountId, spaceId]);
   return (
     <div className="zm-member-work">
       {leaveConfirmation.dialog}
@@ -203,19 +228,23 @@ function MemberWork({
             initialSection="tasks"
             appearance={appearance}
             knowledge={{ ...knowledgeApi, actorId: accountId, spaceId, lifetime }}
+            memberAssets={{ api: memberAssets, spaceId, lifetime }}
             {...(nativeExecution ? { nativeRun } : {})}
             projectExecution={projectContext}
             {...(openWork ? { openWork } : {})}
+            viewScope={viewScope}
           />
         </div>
       ) : (
         <main className="zm-page">
           <h1>我的工作</h1>
+          <EfficiencyExportControls fetcher={fetcher} />
           <div className="zm-execution-workspace">
-            <StartablePlansPanel api={api} onStarted={started} />
+            <StartablePlansPanel api={api} onStarted={started} viewScope={viewScope} />
             <ExecutionWorkspace
               api={api}
               refreshKey={refreshKey}
+              viewScope={viewScope}
               {...(nativeExecution ? { nativeRun } : {})}
             />
           </div>
@@ -311,6 +340,7 @@ export function MemberExecutionPage({
           <div role="status">正在确认工作空间…</div>
         ) : (
           <MemberSpaceBoundary
+            // 切换页面会重挂载以放弃未保存草稿；已读取的清单由会话记忆立刻画回。
             key={epoch}
             api={identity}
             session={session}
