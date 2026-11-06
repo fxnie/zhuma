@@ -22,6 +22,15 @@ import { describeTeamAssetFileTool } from './team-asset-file-tool.js';
 import type { RemoteTeamAssetFileReadGrant } from './remote-team-asset-file-authority.js';
 import { z } from 'zod';
 import {
+  efficiencyDocument,
+  efficiencyExportSchema,
+  efficiencyTaskIds,
+  noteExecutionFact,
+  notePlanIfTerminal,
+  noteTaskStarted,
+  type EfficiencyPlanNode,
+} from './efficiency-log.js';
+import {
   canonicalPayload,
   remoteWorkflowRefSchema,
   remoteWorkflowIntentSchema,
@@ -57,6 +66,7 @@ import {
   unlockDownstream,
   unlockKey,
   castBallot,
+  bindVersionedReviewComment,
   WorkbenchError,
   WorkTaskSchema,
   type ArtifactFileRef,
@@ -615,7 +625,12 @@ export const executionMemberRequestSchemas = Object.freeze({
   draftRead: draftReadSchema,
   draftWrite: draftWriteSchema,
 });
-const inboxSchema = z.strictObject({ spaceId: id.optional() });
+/** Opt-in for non-executable wait rows. Absent requests keep the original inbox. */
+const INBOX_WAITING_DETAIL = 'waiting' as const;
+const inboxSchema = z.strictObject({
+  spaceId: id.optional(),
+  detail: z.literal(INBOX_WAITING_DETAIL).optional(),
+});
 const startableSchema = z.strictObject({ spaceId: id.optional() });
 const eventsSchema = z.strictObject({
   taskId: id,
@@ -868,6 +883,21 @@ function draftKeyLimit(
   return undefined;
 }
 
+/** Stable id for the comment created by one ballot idempotency key. */
+function reviewCommentId(idempotencyKey: string): string {
+  return `c-${createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 32)}`;
+}
+
+/** Keep caller citations, and add the comment this return just pinned to the version. */
+function withVersionCitation(
+  requested: readonly string[] | undefined,
+  citedId: string | undefined,
+): readonly string[] | undefined {
+  if (citedId === undefined) return requested;
+  if (requested?.some((id) => id.trim() === citedId)) return requested;
+  return [...(requested ?? []), citedId];
+}
+
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): ExecutionResult<T> {
   const parsed = schema.safeParse(body);
   if (parsed.success) return { ok: true, value: parsed.data };
@@ -1029,13 +1059,14 @@ function withExecutionEvent(
 ): ExecutionNodeRecord | undefined {
   const log: readonly NodeEvent[] = Array.isArray(record.events) ? record.events : [];
   const sequence = log.reduce((max, item) => Math.max(max, item.sequence), 0) + 1;
+  const occurredAt = new Date().toISOString();
   const appended = recordCommandEvent({
     decisionStatus: 'applied',
     log,
     event: {
       eventId: `evt:${record.nodeId}:${sequence}`,
       sequence,
-      occurredAt: new Date().toISOString(),
+      occurredAt,
       actorId,
       object: { type: 'node', id: record.nodeId },
       type,
@@ -1159,6 +1190,10 @@ function intactNode(record: ExecutionNodeRecord): boolean {
 
 function samePlan(record: ExecutionNodeRecord, taskId: string, planId: string, revision: number) {
   return record.taskId === taskId && record.planId === planId && record.revision === revision;
+}
+
+function eventCount(record: ExecutionNodeRecord | undefined): number {
+  return record && Array.isArray(record.events) ? record.events.length : 0;
 }
 
 function rejectionDetails(
@@ -1287,6 +1322,13 @@ export class ExecutionService {
           this.assertRunStoreCompatibility();
           if (hasState) requireWorkspaceApprovalWriter(this.readRunGlobal());
         },
+        readSnapshot: () => {
+          const state = table.read();
+          const runs: WorkspaceApprovalRun[] = [];
+          this.assertRunStoreCompatibility(runs);
+          if (state !== undefined) requireWorkspaceApprovalWriter(this.readRunGlobal());
+          return { state, runs };
+        },
         enableWriter: () => {
           if (!this.storage.writeGlobal)
             throw new WorkspaceApprovalError('workspace-approval-unavailable');
@@ -1343,19 +1385,9 @@ export class ExecutionService {
           };
         },
         runs: () => {
-          const found: WorkspaceApprovalRun[] = [];
-          for (const node of this.storage.listNodes())
-            for (const run of readExecutionRunState(node)?.runs ?? []) {
-              if (run.workspace.kind !== 'local') continue;
-              found.push({
-                scope: executionRunScope(node, run),
-                workspace: run.workspace,
-                resources: run.resources,
-                ...(run.attempt.sessionId ? { nativeSessionId: run.attempt.sessionId } : {}),
-                ...(run.attempt.executorRunId ? { nativeAgentId: run.attempt.executorRunId } : {}),
-              });
-            }
-          return found;
+          const runs: WorkspaceApprovalRun[] = [];
+          this.readRunStates(this.storage.listNodes(), runs);
+          return runs;
         },
         assertDrained: (run) => {
           const host = currentHost();
@@ -5171,13 +5203,35 @@ export class ExecutionService {
     return { ok: true, value: structuredClone(decision) };
   }
 
-  private assertRunStoreCompatibility(): void {
+  private readRunStates(
+    nodes: readonly ExecutionNodeRecord[],
+    workspaceRuns?: WorkspaceApprovalRun[],
+  ): void {
+    for (const node of nodes) {
+      const state = readExecutionRunState(node);
+      // Ordinary compatibility callers retain no parsed state. A call-local
+      // collector only keeps the minimal original workspace metadata.
+      if (!workspaceRuns) continue;
+      for (const run of state?.runs ?? []) {
+        if (run.workspace.kind !== 'local') continue;
+        workspaceRuns.push({
+          scope: executionRunScope(node, run),
+          workspace: run.workspace,
+          resources: run.resources,
+          ...(run.attempt.sessionId ? { nativeSessionId: run.attempt.sessionId } : {}),
+          ...(run.attempt.executorRunId ? { nativeAgentId: run.attempt.executorRunId } : {}),
+        });
+      }
+    }
+  }
+
+  private assertRunStoreCompatibility(workspaceRuns?: WorkspaceApprovalRun[]): void {
     const nodes = this.storage.listNodes();
     assertExecutionRunStoreCompatibility(
       this.storage.readGlobal ? this.storage.readGlobal() : { schemaVersion: 1 },
       nodes,
     );
-    for (const node of nodes) readExecutionRunState(node);
+    this.readRunStates(nodes, workspaceRuns);
   }
 
   /** Every old writer passes here in the original queue. Never drop native metadata. */
@@ -5330,6 +5384,59 @@ export class ExecutionService {
             return published ? [published] : [];
           }),
         },
+      };
+    });
+  }
+
+  /**
+   * 已落盘的效率事实。未知历时保持空值。
+   * 可见性和收件箱相同：当前成员目录、任务参与关系，以及任务所属空间。
+   * 指定了无权任务时与不存在同一份 not-found。目录故障是 unavailable，不返回部分指标。
+   */
+  exportEfficiency(caller: ExecutionCaller, body: unknown) {
+    return this.enqueue(async () => {
+      const actor = this.listActor(caller, body);
+      if (!actor.ok) return actor;
+      const parsed = parseBody(efficiencyExportSchema, body);
+      if (!parsed.ok) return parsed;
+      if (!this.projectSpaceDirectory()) return fail('not-found');
+      const opened = this.checkListActor(caller, body, actor.value);
+      if (!opened.ok) return opened;
+      for (const task of this.workbench.readWorkbench().tasks) {
+        const space = await this.gateSpaceScoped(task.id, actor.value.spaceIds, undefined);
+        if (space !== 'missing' && !space.ok && space.error.code === 'unavailable') return space;
+      }
+      const requested = parsed.value.taskId;
+      const candidates =
+        requested !== undefined
+          ? [requested]
+          : [
+              ...new Set([
+                ...efficiencyTaskIds(),
+                ...this.storage
+                  .listNodes()
+                  .flatMap((record) => (intactNode(record) ? [record.taskId] : [])),
+              ]),
+            ];
+      const taskIds = new Set<string>();
+      for (const taskId of candidates) {
+        const visible = await this.efficiencyTaskVisible(
+          taskId,
+          actor.value.actorId,
+          actor.value.spaceIds,
+        );
+        if (typeof visible !== 'string') return visible;
+        const current = this.checkListActor(caller, body, actor.value);
+        if (!current.ok) return current;
+        if (visible === 'allow') taskIds.add(taskId);
+        else if (requested !== undefined) return fail('not-found');
+      }
+      const finished = this.checkListActor(caller, body, actor.value);
+      if (!finished.ok) return finished;
+      this.projectEfficiencyFacts(taskIds);
+      return {
+        ok: true as const,
+        value: efficiencyDocument({ format: parsed.value.format, taskIds: [...taskIds] }),
       };
     });
   }
@@ -6532,22 +6639,54 @@ export class ExecutionService {
         body,
         ballotSchema,
         (actorId, request, record) => {
+          const ballot = {
+            reviewerId: actorId,
+            roundId: request.roundId,
+            artifactVersionId: request.artifactVersionId,
+            action: request.action,
+            ...(request.comment === undefined ? {} : { comment: request.comment }),
+            ...(request.unresolvedCommentIds === undefined
+              ? {}
+              : { unresolvedCommentIds: request.unresolvedCommentIds }),
+          };
+          if (record.receipts.some((item) => item.idempotencyKey === request.idempotencyKey)) {
+            // Legacy receipts predate the generated version-comment citation. Only a full
+            // replay of the original request may return before the current binding path.
+            const replay = castBallot({
+              record,
+              actorId,
+              idempotencyKey: request.idempotencyKey,
+              expectedVersion: request.expectedVersion,
+              ballot,
+              comments: record.comments,
+              receiptComments: [],
+            });
+            if (replay.ok && replay.disposition === 'replayed')
+              return { result: replay, settle: true };
+          }
+          const bound = bindVersionedReviewComment({
+            existing: record.comments,
+            id: reviewCommentId(request.idempotencyKey),
+            artifactVersionId: request.artifactVersionId,
+            action: request.action,
+            authorId: actorId,
+            ...(request.comment === undefined ? {} : { comment: request.comment }),
+          });
+          const unresolvedCommentIds = withVersionCitation(
+            request.unresolvedCommentIds,
+            bound.citedId,
+          );
           const result = castBallot({
             record,
             actorId,
             idempotencyKey: request.idempotencyKey,
             expectedVersion: request.expectedVersion,
             ballot: {
-              reviewerId: actorId,
-              roundId: request.roundId,
-              artifactVersionId: request.artifactVersionId,
-              action: request.action,
-              ...(request.comment === undefined ? {} : { comment: request.comment }),
-              ...(request.unresolvedCommentIds === undefined
-                ? {}
-                : { unresolvedCommentIds: request.unresolvedCommentIds }),
+              ...ballot,
+              ...(unresolvedCommentIds === undefined ? {} : { unresolvedCommentIds }),
             },
-            comments: record.comments,
+            comments: bound.comments,
+            receiptComments: bound.owned === undefined ? [] : [bound.owned],
           });
           return { result, settle: true };
         },
@@ -6709,12 +6848,23 @@ export class ExecutionService {
           if (current.fingerprint !== selection.fingerprint)
             throw new WorkbenchError('conflict', '当前计划已变化，请刷新。');
         };
-        const value = taskProgressProjection(selection, {
-          global: this.storage.readGlobal ? this.storage.readGlobal() : { schemaVersion: 1 },
-          readPlan: (target) =>
-            this.storage.readPlan(planKey(target.taskId, target.planId, target.revision)),
-          readNode: (target) => this.storage.readNode(nodeRecordKey(target)),
-        });
+        const value = taskProgressProjection(
+          selection,
+          {
+            global: this.storage.readGlobal ? this.storage.readGlobal() : { schemaVersion: 1 },
+            readPlan: (target) =>
+              this.storage.readPlan(planKey(target.taskId, target.planId, target.revision)),
+            readNode: (target) => this.storage.readNode(nodeRecordKey(target)),
+            workflowLive: (target) =>
+              this.workflowIntents?.observesRunning({
+                spaceId: query.spaceId,
+                taskId: target.taskId,
+                planId: target.planId,
+                revision: target.revision,
+              }) ?? false,
+          },
+          { detail: query.detail === 'nodes' },
+        );
         check();
         return { ok: true, value };
       });
@@ -7863,7 +8013,11 @@ export class ExecutionService {
     if (!Array.isArray(records)) return records;
     const refreshed = this.checkListActor(caller, body, actor.value);
     if (!refreshed.ok) return refreshed;
-    const items = executionInbox({ actorId: actor.value.actorId, records });
+    const derived = executionInbox({ actorId: actor.value.actorId, records });
+    const items =
+      parsed.value?.detail === INBOX_WAITING_DETAIL
+        ? derived
+        : derived.filter((item) => item.action !== 'wait');
     const nodes = records
       .filter((record) =>
         items.some((item) => item.nodeId === record.nodeId && item.taskId === record.taskId),
@@ -7964,6 +8118,140 @@ export class ExecutionService {
     return { ok: true, value: false };
   }
 
+  /**
+   * 参与关系不够。空间门禁把无权、跨空间和找不到的任务收成同一份 omit。
+   * 目录故障原样返回，调用方不得把它当成空指标。
+   */
+  private async efficiencyTaskVisible(
+    taskId: string,
+    actorId: string,
+    spaceIds: readonly string[],
+  ): Promise<'allow' | 'omit' | { readonly ok: false; readonly error: ExecutionFailure }> {
+    if (planMembership(this.workbench.readWorkbench(), taskId, actorId) !== 'allowed') {
+      return 'omit';
+    }
+    const space = await this.gateSpaceScoped(taskId, spaceIds, undefined);
+    if (space === 'missing') return 'omit';
+    if (!space.ok) return space.error.code === 'unavailable' ? space : 'omit';
+    return 'allow';
+  }
+
+  /**
+   * 只记这次已经写进存储的新事件。写盘失败的那次不会留下开始时间。
+   * 不回读任务里的旧节点。同 key 再记一次会被效率日志丢掉。
+   * 返回本次新增终态事件的时间，供任务结束沿用落盘戳而不是另扫历史。
+   */
+  private rememberCommittedEfficiency(
+    committed: ExecutionNodeRecord,
+    priorEventCount: number,
+  ): string | undefined {
+    if (!intactNode(committed)) return undefined;
+    const events = Array.isArray(committed.events) ? committed.events : [];
+    const from = Math.min(Math.max(priorEventCount, 0), events.length);
+    let endedAt: string | undefined;
+    for (const event of events.slice(from)) {
+      const status = event.payload?.status;
+      const version = event.payload?.version;
+      if (typeof status !== 'string' || typeof version !== 'number') continue;
+      noteExecutionFact({
+        taskId: committed.taskId,
+        planId: committed.planId,
+        revision: committed.revision,
+        nodeId: committed.nodeId,
+        assigneeKind: committed.handoff.assignee.kind,
+        eventType: event.type,
+        occurredAt: event.occurredAt,
+        status,
+        version,
+      });
+      if (event.type === 'node-started') {
+        noteTaskStarted({
+          taskId: committed.taskId,
+          planId: committed.planId,
+          revision: committed.revision,
+          occurredAt: event.occurredAt,
+        });
+      }
+      if (
+        (status === 'completed' || status === 'failed' || status === 'cancelled') &&
+        (endedAt === undefined || event.occurredAt > endedAt)
+      ) {
+        endedAt = event.occurredAt;
+      }
+    }
+    return endedAt;
+  }
+
+  private noteEfficiencyPlan(
+    taskId: string,
+    planId: string,
+    revision: number,
+    occurredAt?: string,
+  ): void {
+    notePlanIfTerminal(
+      this.storage
+        .listNodes()
+        .filter((record) => intactNode(record) && samePlan(record, taskId, planId, revision)),
+      occurredAt,
+    );
+  }
+
+  /** 导出时用已经落盘的节点戳补齐效率日志。写入路径不走这里。重复 sourceId 会被忽略。 */
+  private projectEfficiencyFacts(taskIds: ReadonlySet<string>): void {
+    const groups = new Map<
+      string,
+      { nodes: EfficiencyPlanNode[]; started?: string; ended?: string }
+    >();
+    for (const record of this.storage.listNodes()) {
+      if (!intactNode(record) || !taskIds.has(record.taskId)) continue;
+      const key = `${record.taskId}\0${record.planId}\0${record.revision}`;
+      const group = groups.get(key) ?? { nodes: [] };
+      group.nodes.push(record);
+      for (const event of Array.isArray(record.events) ? record.events : []) {
+        const status = event.payload?.status;
+        const version = event.payload?.version;
+        if (typeof status !== 'string' || typeof version !== 'number') continue;
+        noteExecutionFact({
+          taskId: record.taskId,
+          planId: record.planId,
+          revision: record.revision,
+          nodeId: record.nodeId,
+          assigneeKind: record.handoff.assignee.kind,
+          eventType: event.type,
+          occurredAt: event.occurredAt,
+          status,
+          version,
+        });
+        if (
+          event.type === 'node-started' &&
+          (group.started === undefined || event.occurredAt < group.started)
+        ) {
+          group.started = event.occurredAt;
+        }
+        if (
+          (status === 'completed' || status === 'failed' || status === 'cancelled') &&
+          (group.ended === undefined || event.occurredAt > group.ended)
+        ) {
+          group.ended = event.occurredAt;
+        }
+      }
+      groups.set(key, group);
+    }
+    for (const group of groups.values()) {
+      const head = group.nodes[0];
+      if (!head) continue;
+      if (group.started) {
+        noteTaskStarted({
+          taskId: head.taskId,
+          planId: head.planId,
+          revision: head.revision,
+          occurredAt: group.started,
+        });
+      }
+      if (group.ended) notePlanIfTerminal(group.nodes, group.ended);
+    }
+  }
+
   private async startPlanNow(caller: ExecutionCaller, body: unknown, beforeWrite?: () => void) {
     const actor = this.actor(caller, body);
     if (!actor.ok) return actor;
@@ -8032,12 +8320,14 @@ export class ExecutionService {
     if (!started.ok) return fail(started.code);
     for (const record of started.records) {
       const key = nodeRecordKey(record);
-      if (this.storage.readNode(key) === record) continue;
+      const existing = this.storage.readNode(key);
+      if (existing === record) continue;
       const stamped = withExecutionEvent(record, 'node-started', actor.value.actorId);
       if (!stamped) return fail('unavailable');
       beforeWrite?.();
       const stored = await this.persist(() => this.writeNode(stamped));
       if (!stored.ok) return stored;
+      this.rememberCommittedEfficiency(stamped, eventCount(existing));
     }
     const compensated = await this.unlockCompleted(taskId, planId, revision);
     if (!compensated.ok) return compensated;
@@ -8049,6 +8339,7 @@ export class ExecutionService {
     beforeWrite?.();
     const stored = await this.persist(() => this.storage.writePlan(key, receipt));
     if (!stored.ok) return stored;
+    this.noteEfficiencyPlan(taskId, planId, revision);
     return {
       ok: true as const,
       value: {
@@ -8145,6 +8436,8 @@ export class ExecutionService {
       }
       const stored = await this.persist(() => this.writeNode(record));
       if (!stored.ok) return stored;
+      const endedAt = this.rememberCommittedEfficiency(record, eventCount(current));
+      this.noteEfficiencyPlan(current.taskId, current.planId, current.revision, endedAt);
     }
     if (record.command.status === 'completed') {
       const unlocked = await this.unlockFrom(record);
@@ -8210,6 +8503,10 @@ export class ExecutionService {
       if (!stamped) return fail('unavailable');
       const stored = await this.persist(() => this.writeNode(stamped));
       if (!stored.ok) return stored;
+      const endedAt = this.rememberCommittedEfficiency(stamped, eventCount(latest));
+      if (endedAt !== undefined) {
+        this.noteEfficiencyPlan(completed.taskId, completed.planId, completed.revision, endedAt);
+      }
       unlocked += 1;
     }
     return { ok: true, value: unlocked };
