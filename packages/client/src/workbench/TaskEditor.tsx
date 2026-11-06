@@ -23,7 +23,7 @@ import { NodeInspector } from './NodeInspector.js';
 import { TreeNavigator } from './TreeNavigator.js';
 import { indexWorkTree, resolveWorkLocation, workflowPath } from './navigation.js';
 import { Button } from './Button.js';
-import { Appearance, type AppearanceStore } from './Appearance.js';
+import type { AppearanceStore } from './Appearance.js';
 import { TemplateSaveDialog } from './TemplateSaveDialog.js';
 import { TemplateBindings, type TemplateBindingValues } from './TemplateBindings.js';
 import { SingleSelect } from './SingleSelect.js';
@@ -31,14 +31,19 @@ import { PlanningChanges } from './PlanningChanges.js';
 import { ControlIcon } from './ControlIcon.js';
 import { useUnsavedChanges } from './UnsavedChanges.js';
 import { PlanningReadiness, usePlanningReadiness } from './PlanningReadiness.js';
+import { registerCatalogReturn } from './catalog-return.js';
 import { useLeaveConfirmation } from './useLeaveConfirmation.js';
 import { NativeRunLauncher } from '../run/NativeRunWorkspace.js';
 import type { NativeRunApi } from '../run/api.js';
 import { WorkflowControls } from '../workflow/WorkflowControls.js';
 import type { WorkflowView } from '../workflow/api.js';
+import { confirmedNodeTitles, progressNodeMarks } from '../execution/progress-focus.js';
 import { latestTaskPlan, type TaskProgressState } from '../execution/useTaskProgress.js';
 import { TaskProgressSummary } from '../execution/TaskProgressSummary.js';
+import { taskHeading } from './task-heading.js';
 import { expertResources, prepareExpertProposal } from './expert-resources.js';
+import { MemberAssetFilePicker } from '../assets/MemberAssetFilePicker.js';
+import type { MemberAssetApi } from '../assets/api.js';
 
 // Started only by the create-form submit handler. The parent owns cancellation on task exit.
 export type InitialPlanning = {
@@ -71,13 +76,14 @@ export function TaskEditor({
   model,
   saved,
   close,
-  appearance,
+  returnToCatalog,
   initialPlanning,
   backLabel = '任务清单',
   openWork,
   nativeRun,
   progress,
   refreshProgress,
+  memberAssets,
 }: {
   original: WorkTask;
   state: Workbench;
@@ -85,13 +91,17 @@ export function TaskEditor({
   model: string;
   saved(state: Workbench): void;
   close(): void;
-  appearance: AppearanceStore;
+  /** Sidebar reselect of the team workbench. Defaults to the breadcrumb close. */
+  returnToCatalog?: () => void;
+  /** Accepted for existing embedders; theme preferences are managed in Settings. */
+  appearance?: AppearanceStore;
   initialPlanning?: InitialPlanning;
   backLabel?: string;
   openWork?: () => void;
   nativeRun?: { api: NativeRunApi; spaceId: string };
   progress?: TaskProgressState | undefined;
   refreshProgress?: (() => void) | undefined;
+  memberAssets?: { api: MemberAssetApi; spaceId: string };
 }) {
   const [task, setTask] = useState(() => structuredClone(original));
   const planningReadiness = usePlanningReadiness(api, model);
@@ -204,6 +214,29 @@ export function TaskEditor({
   const canPlan = !api.member || memberCapability?.plan === true;
   useUnsavedChanges(dirty || busy || planning || !!proposal);
   const leaveConfirmation = useLeaveConfirmation(() => alive.current);
+  const catalogLeave = useRef({
+    blocked: false,
+    close,
+    returnToCatalog: returnToCatalog ?? close,
+  });
+  catalogLeave.current = {
+    blocked: dirty || busy || planning || !!proposal,
+    close,
+    returnToCatalog: returnToCatalog ?? close,
+  };
+  useEffect(
+    () =>
+      registerCatalogReturn((signal, proceed) => {
+        const now = catalogLeave.current;
+        const leave = () => {
+          now.returnToCatalog();
+          if (!signal.aborted) proceed();
+        };
+        const accepted = leaveConfirmation.request(leave, now.blocked, signal);
+        if (!accepted && !signal.aborted && !now.blocked) leave();
+      }),
+    [leaveConfirmation.request],
+  );
   const previewTask = useMemo(
     () =>
       proposal?.result.workflows.length ? { ...task, workflows: proposal.result.workflows } : null,
@@ -660,11 +693,14 @@ export function TaskEditor({
       {leaveConfirmation.dialog}
       <div className="zm-toolbar">
         <button
+          type="button"
           className="zm-quiet"
           onClick={() => {
-            if (api.member)
-              leaveConfirmation.request(close, dirty || busy || planning || !!proposal);
-            else if (!dirty || confirm('有未保存的修改，确定离开吗？')) close();
+            const blocked = dirty || busy || planning || !!proposal;
+            if (api.member) {
+              const accepted = leaveConfirmation.request(close, blocked);
+              if (!accepted && !blocked) close();
+            } else if (!dirty || confirm('有未保存的修改，确定离开吗？')) close();
           }}
         >
           <ControlIcon direction="left" /> {backLabel}
@@ -703,7 +739,6 @@ export function TaskEditor({
             保存为工作流
           </Button>
         )}
-        <Appearance store={appearance} />
         {conflict && (
           <Button disabled={busy || planning} onClick={() => void readLatest()}>
             读取最新版本
@@ -751,7 +786,7 @@ export function TaskEditor({
       </div>
       <div className="zm-editor-heading">
         {task.status === 'ready' ? (
-          <h1>{task.title}</h1>
+          <h1 title={task.title}>{taskHeading(task)}</h1>
         ) : (
           <input
             className="zm-title-input"
@@ -768,7 +803,11 @@ export function TaskEditor({
               ? `计划已确认${applied ? ` v${applied.revision}` : ''}${api.member ? '' : ' · 待执行接入'}`
               : '计划草稿'}
           </span>
-          <TaskProgressSummary progress={progress} confirmed={!!applied} />
+          <TaskProgressSummary
+            progress={progress}
+            confirmed={!!applied}
+            nodeTitles={confirmedNodeTitles(state.appliedPlans, progress)}
+          />
           {applied && refreshProgress && (
             <Button variant="quiet" onClick={refreshProgress}>
               刷新进度
@@ -829,6 +868,14 @@ export function TaskEditor({
             />
           )}
         </details>
+        {memberAssets && (
+          <MemberAssetFilePicker
+            {...memberAssets}
+            value={task.fileRefs}
+            disabled={locked}
+            change={(fileRefs) => edit({ ...task, fileRefs })}
+          />
+        )}
       </div>
       {nativeRun?.api.workflow &&
         api.member &&
@@ -1060,6 +1107,7 @@ export function TaskEditor({
               workTree={workTree}
               expanded={expanded}
               locateRequest={locateRequest}
+              marks={progressNodeMarks(progress)}
             />
           ) : workflow.nodes.length ? (
             <div className="zm-node-list">
